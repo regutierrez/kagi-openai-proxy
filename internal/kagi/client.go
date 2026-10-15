@@ -306,6 +306,7 @@ type createBody struct {
 	EnableSearch    bool   `json:"enable_search"`
 	Personalization bool   `json:"personalization"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"` // omitted = Kagi's per-model default
+	IsSaved         *bool  `json:"is_saved,omitempty"`         // false = "Temporary"; omitted = account default
 }
 
 // TurnOptions are the per-turn knobs of POST /api/v2/conversations.
@@ -313,12 +314,15 @@ type TurnOptions struct {
 	EnableSearch    bool
 	Personalization bool
 	ReasoningEffort string // "" = omit the field (Kagi's per-model default)
+	// IsSaved: false creates a "Temporary" thread (auto-expires per the account's
+	// temporary_duration); nil omits the field (the account's thread_saving_mode applies).
+	IsSaved *bool
 }
 
 // CreateTurn is POST /api/v2/conversations: create a thread and submit the prompt.
 func (c *Client) CreateTurn(ctx context.Context, content, model string, opts TurnOptions) (CreatedTurn, error) {
 	const what = "POST /api/v2/conversations"
-	body := createBody{content, model, opts.EnableSearch, opts.Personalization, opts.ReasoningEffort}
+	body := createBody{content, model, opts.EnableSearch, opts.Personalization, opts.ReasoningEffort, opts.IsSaved}
 	resp, err := c.send(ctx, http.MethodPost, "/api/v2/conversations", body, "application/json")
 	if err != nil {
 		return CreatedTurn{}, err

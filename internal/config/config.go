@@ -26,7 +26,7 @@ type Settings struct {
 	AllowedHosts        []string
 	Port                int
 	KagiBaseURL         string
-	DeleteThreads       bool
+	ThreadLifecycle     ThreadLifecycle
 	Personalization     bool
 	SearchDefaultOnline bool
 	// ReasoningEffort is KAGI_REASONING_EFFORT: the effort used when neither the request
@@ -37,6 +37,8 @@ type Settings struct {
 	ConnectTimeout  time.Duration
 	ReadTimeout     time.Duration
 	ModelsTTL       time.Duration
+	// Warnings are startup notices (e.g. deprecated variables) for main to log once.
+	Warnings []string
 	// Internal tuning knobs; not part of the documented env surface.
 	Keepalive    time.Duration
 	DrainTimeout time.Duration
@@ -56,7 +58,7 @@ func Defaults(token, key string) Settings {
 		AllowedHosts:        DefaultAllowedHosts(),
 		Port:                8000,
 		KagiBaseURL:         "https://assistant.kagi.com",
-		DeleteThreads:       true,
+		ThreadLifecycle:     LifecycleDelete,
 		Personalization:     false,
 		SearchDefaultOnline: true,
 		MaxConcurrency:      1,
@@ -67,6 +69,71 @@ func Defaults(token, key string) Settings {
 		Keepalive:           15 * time.Second,
 		DrainTimeout:        600 * time.Second,
 	}
+}
+
+// ThreadLifecycle is what happens to each Kagi thread the proxy creates
+// (KAGI_THREAD_LIFECYCLE).
+type ThreadLifecycle string
+
+const (
+	// LifecycleDelete sends DELETE after the turn. Kagi's DELETE is a soft delete: the
+	// thread goes to the trash (restorable) until Kagi empties it.
+	LifecycleDelete ThreadLifecycle = "delete"
+	// LifecycleTemporary creates the thread with is_saved=false (the UI's "Temporary"):
+	// no DELETE; Kagi expires it after the account's temporary window.
+	LifecycleTemporary ThreadLifecycle = "temporary"
+	// LifecycleKeep omits is_saved (the account's thread_saving_mode applies); no DELETE.
+	LifecycleKeep ThreadLifecycle = "keep"
+)
+
+// DeletesThreads reports whether threads are deleted after their turn.
+func (l ThreadLifecycle) DeletesThreads() bool { return l == LifecycleDelete }
+
+// IsSaved is the is_saved value to send at creation; nil = omit the field.
+func (l ThreadLifecycle) IsSaved() *bool {
+	if l == LifecycleTemporary {
+		saved := false
+		return &saved
+	}
+	return nil
+}
+
+// threadLifecycle reads KAGI_THREAD_LIFECYCLE and its deprecated alias
+// KAGI_DELETE_THREADS (true -> delete, false -> keep). Both set and disagreeing is an
+// error; the alias alone yields a deprecation warning.
+func threadLifecycle(get Lookup) (ThreadLifecycle, []string, error) {
+	var lifecycle ThreadLifecycle
+	if raw, ok := get("KAGI_THREAD_LIFECYCLE"); ok && textutil.Strip(raw) != "" {
+		lifecycle = ThreadLifecycle(strings.ToLower(textutil.Strip(raw)))
+		switch lifecycle {
+		case LifecycleDelete, LifecycleTemporary, LifecycleKeep:
+		default:
+			return "", nil, errorf("KAGI_THREAD_LIFECYCLE must be delete, temporary or keep, got %s", textutil.Repr(raw))
+		}
+	}
+	raw, aliasSet := get("KAGI_DELETE_THREADS")
+	if !aliasSet || textutil.Strip(raw) == "" {
+		if lifecycle == "" {
+			lifecycle = LifecycleDelete
+		}
+		return lifecycle, nil, nil
+	}
+	deletes, err := boolean(get, "KAGI_DELETE_THREADS", true)
+	if err != nil {
+		return "", nil, err
+	}
+	alias := LifecycleKeep
+	if deletes {
+		alias = LifecycleDelete
+	}
+	if lifecycle == "" {
+		return alias, []string{fmt.Sprintf("KAGI_DELETE_THREADS is deprecated; use KAGI_THREAD_LIFECYCLE=%s instead", alias)}, nil
+	}
+	if lifecycle != alias {
+		return "", nil, errorf("KAGI_THREAD_LIFECYCLE=%s conflicts with the deprecated KAGI_DELETE_THREADS=%s (which means %s); unset KAGI_DELETE_THREADS",
+			lifecycle, textutil.Strip(raw), alias)
+	}
+	return lifecycle, nil, nil
 }
 
 // DefaultAllowedHosts is the localhost-only Host allow-list.
@@ -173,7 +240,7 @@ func FromEnv(get Lookup) (Settings, error) {
 	if s.Port, err = integer(get, "PROXY_PORT", s.Port, 1); err != nil {
 		return Settings{}, err
 	}
-	if s.DeleteThreads, err = boolean(get, "KAGI_DELETE_THREADS", s.DeleteThreads); err != nil {
+	if s.ThreadLifecycle, s.Warnings, err = threadLifecycle(get); err != nil {
 		return Settings{}, err
 	}
 	if s.Personalization, err = boolean(get, "KAGI_PERSONALIZATION", s.Personalization); err != nil {

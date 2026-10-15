@@ -41,7 +41,7 @@ Endpoints used by v0.1:
 - `GET /api/init` → JSON model catalog: `models.models[]` each `{id, provider, display_name, context_window, supported, deprecated, retired}` plus a default model id. Filter to `supported && !deprecated && !retired`.
 - `POST /api/v2/conversations` — creates a new thread AND sends the first prompt in one call. JSON body: `{content: string, model: string, enable_search: bool, personalization: bool}`. Response: `{conversation: {uuid, title, created_at, updated_at, is_saved, is_shared, model_name, folder_uuid}, branch_uuid: string, assistant_turn_uuid: string}`.
 - `GET /api/v2/turns/{assistant_turn_uuid}/stream` with header `Accept: text/event-stream` — chunked SSE stream of the turn.
-- `DELETE /api/conversations/{conversation_uuid}` — delete the thread.
+- `DELETE /api/conversations/{conversation_uuid}` — delete the thread. *(Go port, verified live: this is a soft delete — the thread goes to the trash, restorable via `POST .../restore`; `DELETE .../permanent` and `/api/conversations/deleted/purge` also exist and are unused.)*
 
 SSE stream format:
 
@@ -74,6 +74,14 @@ SSE stream format:
 - Model-id grammar: `requested = model-id *(":" suffix)`, `suffix = "online" / "offline" / effort`. The model id is everything before the first `:`. Suffixes are a set (order-insensitive, repeats allowed); unknown tokens, `online`+`offline`, or two different efforts → 400 `invalid_model_suffix`. `online`/`offline` keep their meaning; neither = `KAGI_SEARCH_DEFAULT`.
 - Validation: a value outside the global set → 400 `invalid_reasoning_effort`. If a fresh catalog (not one being served stale after a failed refresh) lists the model's options: a request/suffix value outside them → 400 `unsupported_reasoning_effort` naming the supported values, before any Kagi call; an env default outside them is omitted for that model and logged once. Otherwise global-only validation, and Kagi's own error is mapped as usual.
 - Thinking output stays dropped (text nodes only); reasoning passthrough is a possible future option.
+
+### Thread lifecycle (Go addition; wire facts verified live)
+
+- `POST /api/v2/conversations` accepts optional `is_saved` (bool). `false` = the UI's "Temporary" state: listed in the sidebar with a Temporary badge, `folder_uuid: null`, `temporary_duration` from account settings (e.g. `"24h"`), auto-expired by Kagi after the account's window. Omitted = the account default (`settings.thread_saving_mode`).
+- `PATCH /api/conversations/{uuid}` with `{"is_saved": bool}` (also `folder_uuid`, `title`, `is_pinned`, `is_shared`) is the UI's Mark temporary/permanent toggle. Not used by the proxy. Account settings `thread_saving_mode` and `temporary_duration` are never touched.
+- `KAGI_THREAD_LIFECYCLE` = `delete` (default; unchanged flow: no `is_saved`, DELETE after the turn → trash) | `temporary` (`is_saved: false`, no DELETE) | `keep` (no `is_saved`, no DELETE). Non-delete modes also skip the cleanup DELETE after failed turns.
+- Deprecated alias `KAGI_DELETE_THREADS`: `true` → `delete`, `false` → `keep`; used alone it logs a deprecation warning at startup; set together with `KAGI_THREAD_LIFECYCLE` and disagreeing → startup error. Invalid values of either → startup error.
+- Every successful chat response carries `X-Kagi-Thread: <conversation-uuid>` (set before the body starts, streaming or not).
 
 ### Proxy auth
 
@@ -137,11 +145,11 @@ All Kagi wire code lives in one module producing internal events only: `NodeCrea
 ### Usage and cleanup
 
 - On `turn.completed`: capture `{input_tokens, output_tokens, cost_usd, model_version}`. Non-streaming → fill the OpenAI `usage` field. Streaming → emit the usage chunk only when `include_usage`. Always log tokens + `cost_usd` (never the token/key values).
-- After the turn ends (success, failure, or client disconnect), if `KAGI_DELETE_THREADS` (default **true**) → `DELETE /api/conversations/{conversation_uuid}`; log failures, never fail the response because of it. On client disconnect: the response generator is cancelled — spawn a background task that keeps reading the upstream stream to completion (bounded), then deletes the thread and releases the semaphore. Try/finally around the whole lifecycle so the semaphore can never leak.
+- After the turn ends (success, failure, or client disconnect), if the thread lifecycle is `delete` (Go port: `KAGI_THREAD_LIFECYCLE`, default `delete`; see "Thread lifecycle" below) → `DELETE /api/conversations/{conversation_uuid}`; log failures, never fail the response because of it. On client disconnect: the response generator is cancelled — spawn a background task that keeps reading the upstream stream to completion (bounded), then deletes the thread and releases the semaphore. Try/finally around the whole lifecycle so the semaphore can never leak.
 
 ### Config (env vars; document all in README)
 
-`KAGI_SESSION_TOKEN` (required), `PROXY_API_KEY` (required), `PROXY_HOST=127.0.0.1`, `PROXY_PORT=8000`, `KAGI_BASE_URL=https://assistant.kagi.com`, `KAGI_DELETE_THREADS=true`, `KAGI_PERSONALIZATION=false`, `KAGI_SEARCH_DEFAULT=online`, `KAGI_MAX_CONCURRENCY=1`, `KAGI_QUEUE_WAIT_SECONDS=30`, `KAGI_CONNECT_TIMEOUT=20`, `KAGI_READ_TIMEOUT=120`, `KAGI_MODELS_TTL=21600`.
+`KAGI_SESSION_TOKEN` (required), `PROXY_API_KEY` (required), `PROXY_HOST=127.0.0.1`, `PROXY_PORT=8000`, `KAGI_BASE_URL=https://assistant.kagi.com`, `KAGI_THREAD_LIFECYCLE=delete` (Go port; replaces `KAGI_DELETE_THREADS=true`, kept as a deprecated alias), `KAGI_PERSONALIZATION=false`, `KAGI_SEARCH_DEFAULT=online`, `KAGI_MAX_CONCURRENCY=1`, `KAGI_QUEUE_WAIT_SECONDS=30`, `KAGI_CONNECT_TIMEOUT=20`, `KAGI_READ_TIMEOUT=120`, `KAGI_MODELS_TTL=21600`.
 
 ### Deliverables (Go port)
 

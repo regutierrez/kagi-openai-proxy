@@ -476,7 +476,7 @@ func TestContextWindowFromCatalogDrivesTruncation(t *testing.T) {
 
 func TestKeepThreadsWhenDeletionDisabled(t *testing.T) {
 	fake := kagitest.New()
-	e := newEnv(t, fake, func(s *config.Settings) { s.DeleteThreads = false })
+	e := newEnv(t, fake, func(s *config.Settings) { s.ThreadLifecycle = config.LifecycleKeep })
 	e.post(chatBody(false, "kagi-default", nil))
 	e.waitIdle()
 	if fake.Has(kagitest.Delete) || e.proxy.Busy() {
@@ -1201,5 +1201,54 @@ func TestModelsListLiveCatalogMix(t *testing.T) {
 	}
 	if len(data) != 16 || with != 14 {
 		t.Fatalf("models=%d with efforts=%d", len(data), with)
+	}
+}
+
+// ---------------------------------------------------------- thread lifecycle
+
+func TestThreadLifecycleModes(t *testing.T) {
+	for _, c := range []struct {
+		mode    config.ThreadLifecycle
+		isSaved any // nil = field omitted
+		deletes bool
+	}{
+		{config.LifecycleDelete, nil, true},       // unchanged default flow
+		{config.LifecycleTemporary, false, false}, // is_saved:false, no DELETE
+		{config.LifecycleKeep, nil, false},        // account default, no DELETE
+	} {
+		for _, stream := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/stream=%v", c.mode, stream), func(t *testing.T) {
+				fake := kagitest.New()
+				e := newEnv(t, fake, func(s *config.Settings) { s.ThreadLifecycle = c.mode })
+				r := e.post(chatBody(stream, "kagi-default", nil))
+				if r.status != 200 || r.header.Get("X-Kagi-Thread") != kagitest.Conv {
+					t.Fatalf("status %d X-Kagi-Thread %q", r.status, r.header.Get("X-Kagi-Thread"))
+				}
+				var sent obj
+				_ = json.Unmarshal(fake.Request(kagitest.Create).Body, &sent)
+				value, present := sent["is_saved"]
+				if c.isSaved == nil && present || c.isSaved != nil && (!present || value != c.isSaved) {
+					t.Fatalf("is_saved = %v (present=%v), want %v", value, present, c.isSaved)
+				}
+				e.waitIdle()
+				if fake.Has(kagitest.Delete) != c.deletes || e.proxy.Busy() {
+					t.Fatalf("DELETE called=%v want %v; calls %v", fake.Has(kagitest.Delete), c.deletes, fake.Calls())
+				}
+			})
+		}
+	}
+}
+
+func TestNonDeleteModesSkipDeleteOnFailedTurnsToo(t *testing.T) {
+	for _, mode := range []config.ThreadLifecycle{config.LifecycleTemporary, config.LifecycleKeep} {
+		fake := kagitest.New()
+		fake.StreamStatus = 401 // the thread exists, but its stream cannot be opened
+		e := newEnv(t, fake, func(s *config.Settings) { s.ThreadLifecycle = mode })
+		if r := e.post(chatBody(false, "kagi-default", nil)); r.status != 401 || r.header.Get("X-Kagi-Thread") != "" {
+			t.Fatalf("%s: %d header %q", mode, r.status, r.header.Get("X-Kagi-Thread"))
+		}
+		if fake.Has(kagitest.Delete) || e.proxy.Busy() {
+			t.Fatalf("%s: calls %v", mode, fake.Calls())
+		}
 	}
 }

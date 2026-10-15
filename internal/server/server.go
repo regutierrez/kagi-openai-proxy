@@ -451,11 +451,14 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	runner, terr := p.startTurn(content, modelID, kagi.TurnOptions{
 		EnableSearch: spec.EnableSearch, Personalization: settings.Personalization, ReasoningEffort: effort,
+		IsSaved: settings.ThreadLifecycle.IsSaved(),
 	})
 	if terr != nil {
 		writeError(w, terr)
 		return
 	}
+	// The thread exists before any body byte is written: tell the client which one it is.
+	w.Header().Set("X-Kagi-Thread", runner.conversationUUID)
 
 	formatter := translate.ChunkFormatter{ID: newCompletionID(), Created: time.Now().Unix(), Model: responseModel}
 	if chat.Stream {
@@ -512,7 +515,7 @@ func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turn
 		var kerr *kagi.Error
 		errors.As(err, &kerr)
 		logx.Warn("Kagi request failed: %s", kerr.Message)
-		if kerr.ConversationUUID != "" && settings.DeleteThreads {
+		if kerr.ConversationUUID != "" && settings.ThreadLifecycle.DeletesThreads() {
 			deleteThreadQuietly(cleanupCtx, p.kagi, kerr.ConversationUUID)
 		}
 		return nil, fail(kerr)
@@ -521,7 +524,7 @@ func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turn
 	if err != nil {
 		var kerr *kagi.Error
 		errors.As(err, &kerr)
-		if settings.DeleteThreads {
+		if settings.ThreadLifecycle.DeletesThreads() {
 			deleteThreadQuietly(cleanupCtx, p.kagi, created.ConversationUUID)
 		}
 		logx.Warn("Kagi request failed: %s", kerr.Message)
@@ -535,7 +538,7 @@ func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turn
 		deleteCtx:        cleanupCtx,
 		conversationUUID: created.ConversationUUID,
 		model:            modelID,
-		deleteThread:     settings.DeleteThreads,
+		deleteThread:     settings.ThreadLifecycle.DeletesThreads(),
 		drainTimeout:     settings.DrainTimeout,
 		release:          p.releaseSlot,
 		consumerPresent:  true,

@@ -38,6 +38,9 @@ func main() {
 		}
 		os.Exit(0)
 	}
+	for _, warning := range settings.Warnings {
+		logx.Warn("%s", warning)
+	}
 	if !server.IsLoopback(settings.Host) {
 		logx.Warn("PROXY_HOST=%s is not a loopback address: make sure this port is reachable only from trusted networks (e.g. published on a Tailscale IP), never the internet", settings.Host)
 	}
