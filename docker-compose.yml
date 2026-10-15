@@ -1,0 +1,13 @@
+services:
+  kagi-openai-proxy:
+    build: .
+    image: kagi-openai-proxy:latest
+    restart: unless-stopped
+    user: "65534:65534"
+    ports:
+      # 100.101.102.103 = your Tailscale IP (`tailscale ip -4`). Never use plain
+      # "8000:8000": that publishes the port on 0.0.0.0, i.e. every interface.
+      - "100.101.102.103:8000:8000"
+    # KAGI_SESSION_TOKEN, PROXY_API_KEY, PROXY_ALLOWED_HOSTS (e.g. your Tailscale IP
+    # and MagicDNS name). This file holds secrets: it is git- and docker-ignored.
+    env_file: .env

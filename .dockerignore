@@ -1,0 +1,10 @@
+.git
+.env
+*.env
+secrets/
+/kagi-openai-proxy
+/probe
+dist/
+*.test
+*.out
+docker-compose.yml

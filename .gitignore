@@ -2,5 +2,7 @@
 /probe
 /dist/
 .env
+*.env
+secrets/
 *.test
 *.out

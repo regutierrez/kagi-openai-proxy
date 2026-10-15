@@ -20,7 +20,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,8 +35,6 @@ import (
 
 // Version is reported by /health.
 const Version = "0.1.0"
-
-var allowedHosts = map[string]bool{"127.0.0.1": true, "localhost": true}
 
 var kagiErrors = map[kagi.Kind]struct {
 	status    int
@@ -130,7 +127,7 @@ func New(settings config.Settings) *Proxy {
 	mux.HandleFunc("GET /v1/models", p.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", p.chatCompletions)
 	mux.HandleFunc("/", p.notFound)
-	p.handler = hostAllowList(mux)
+	p.handler = hostAllowList(settings.AllowedHosts, mux)
 	return p
 }
 
@@ -200,15 +197,17 @@ func (p *Proxy) Close() {
 
 // ------------------------------------------------------------------ middleware
 
-// hostRE is Starlette's host-header grammar; the port is dropped before comparing.
-var hostRE = regexp.MustCompile(`(?i)^([a-z0-9._~%!$&'()*+,;=-]+|\[(?:[a-f0-9]*:[a-f0-9.:]+|(?-i:v)[a-f0-9]+\.[a-z0-9._~!$&'()*+,;=:-]+)\])(?::[0-9]+)?$`)
-
-// hostAllowList rejects any Host other than 127.0.0.1 / localhost (DNS-rebinding
-// defence). There is deliberately no CORS and no gzip middleware.
-func hostAllowList(next http.Handler) http.Handler {
+// hostAllowList rejects any Host (port stripped) not in allowed -- by default only
+// 127.0.0.1 / localhost (DNS-rebinding defence). Matching is exact. There is
+// deliberately no CORS and no gzip middleware.
+func hostAllowList(allowed []string, next http.Handler) http.Handler {
+	set := make(map[string]bool, len(allowed))
+	for _, h := range allowed {
+		set[h] = true
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m := hostRE.FindStringSubmatch(r.Host)
-		if m == nil || !allowedHosts[m[1]] {
+		host, ok := config.HostOnly(r.Host)
+		if !ok || !set[host] {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, "Invalid host header")
@@ -343,19 +342,34 @@ func newCompletionID() string {
 	return "chatcmpl-" + hex.EncodeToString(b[:])
 }
 
-func (p *Proxy) acquireSlot() bool {
+type slotResult int
+
+const (
+	slotAcquired slotResult = iota
+	slotTimeout
+	slotClientGone
+)
+
+// acquireSlot waits up to QueueWait for a turn slot. It gives up as soon as the client
+// disconnects, so a request nobody is waiting for never spends a Kagi turn.
+func (p *Proxy) acquireSlot(ctx context.Context) slotResult {
+	if ctx.Err() != nil {
+		return slotClientGone
+	}
 	select {
 	case p.slots <- struct{}{}:
-		return true
+		return slotAcquired
 	default:
 	}
 	timer := time.NewTimer(p.settings.QueueWait)
 	defer timer.Stop()
 	select {
 	case p.slots <- struct{}{}:
-		return true
+		return slotAcquired
+	case <-ctx.Done():
+		return slotClientGone
 	case <-timer.C:
-		return false
+		return slotTimeout
 	}
 }
 
@@ -402,7 +416,11 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	content := translate.Flatten(chat.Messages, contextWindow)
 
-	if !p.acquireSlot() {
+	switch p.acquireSlot(r.Context()) {
+	case slotClientGone:
+		logx.Info("client disconnected while queued for a Kagi turn slot; nothing was sent to Kagi")
+		return // the client is gone: no status is written
+	case slotTimeout:
 		writeError(w, translate.NewTurnError(429, "rate_limit_error", "proxy_busy", fmt.Sprintf(
 			"another Kagi turn is in progress; waited %ss for a free slot", strconv.FormatFloat(settings.QueueWait.Seconds(), 'g', -1, 64))))
 		return

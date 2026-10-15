@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,9 +17,12 @@ const MinProxyKeyLength = 16
 
 // Settings is the full proxy configuration. Field defaults live in Defaults().
 type Settings struct {
-	KagiSessionToken    string
-	ProxyAPIKey         string
-	Host                string
+	KagiSessionToken string
+	ProxyAPIKey      string
+	Host             string
+	// AllowedHosts are the accepted Host header values, ports stripped (DNS-rebinding
+	// defence). PROXY_ALLOWED_HOSTS overrides DefaultAllowedHosts.
+	AllowedHosts        []string
 	Port                int
 	KagiBaseURL         string
 	DeleteThreads       bool
@@ -45,6 +49,7 @@ func Defaults(token, key string) Settings {
 		KagiSessionToken:    token,
 		ProxyAPIKey:         key,
 		Host:                "127.0.0.1",
+		AllowedHosts:        DefaultAllowedHosts(),
 		Port:                8000,
 		KagiBaseURL:         "https://assistant.kagi.com",
 		DeleteThreads:       true,
@@ -58,6 +63,43 @@ func Defaults(token, key string) Settings {
 		Keepalive:           15 * time.Second,
 		DrainTimeout:        600 * time.Second,
 	}
+}
+
+// DefaultAllowedHosts is the localhost-only Host allow-list.
+func DefaultAllowedHosts() []string { return []string{"127.0.0.1", "localhost"} }
+
+// hostRE is Starlette's host-header grammar: a name, IPv4, or bracketed IPv6 address,
+// optionally followed by :port.
+var hostRE = regexp.MustCompile(`(?i)^([a-z0-9._~%!$&'()*+,;=-]+|\[(?:[a-f0-9]*:[a-f0-9.:]+|(?-i:v)[a-f0-9]+\.[a-z0-9._~!$&'()*+,;=:-]+)\])(?::[0-9]+)?$`)
+
+// HostOnly returns the host part of a Host header value (port stripped; IPv6 keeps its
+// brackets). ok is false if the value is not a valid host.
+func HostOnly(hostHeader string) (host string, ok bool) {
+	m := hostRE.FindStringSubmatch(hostHeader)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// parseAllowedHosts reads a comma-separated host list; whitespace and ports are stripped.
+func parseAllowedHosts(raw string) ([]string, error) {
+	var hosts []string
+	for _, entry := range strings.Split(raw, ",") {
+		entry = textutil.Strip(entry)
+		if entry == "" {
+			continue
+		}
+		host, ok := HostOnly(entry)
+		if !ok {
+			return nil, errorf("PROXY_ALLOWED_HOSTS entry %s is not a host name or address", textutil.Repr(entry))
+		}
+		hosts = append(hosts, host)
+	}
+	if len(hosts) == 0 {
+		return DefaultAllowedHosts(), nil
+	}
+	return hosts, nil
 }
 
 // Error is an invalid or missing setting.
@@ -102,6 +144,13 @@ func FromEnv(get Lookup) (Settings, error) {
 	s.SearchDefaultOnline = search == "online"
 	if raw, ok := get("PROXY_HOST"); ok && textutil.Strip(raw) != "" {
 		s.Host = textutil.Strip(raw)
+	}
+	if raw, ok := get("PROXY_ALLOWED_HOSTS"); ok {
+		hosts, err := parseAllowedHosts(raw)
+		if err != nil {
+			return Settings{}, err
+		}
+		s.AllowedHosts = hosts
 	}
 	if raw, ok := get("KAGI_BASE_URL"); ok && textutil.Strip(raw) != "" {
 		s.KagiBaseURL = textutil.Strip(raw)

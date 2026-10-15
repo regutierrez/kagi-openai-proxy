@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"slices"
@@ -850,5 +852,142 @@ func TestIncludeUsageChunkOnlyWhenRequested(t *testing.T) {
 		if m, ok := f.(map[string]any); ok && m["usage"] != nil {
 			t.Fatal("usage chunk without include_usage")
 		}
+	}
+}
+
+// ---------------------------------------------------------- allowed hosts
+
+func TestCustomAllowedHosts(t *testing.T) {
+	fake := kagitest.New()
+	e := newEnv(t, fake, func(s *config.Settings) {
+		s.AllowedHosts = []string{"100.101.102.103", "mymac.tail1234.ts.net"}
+	})
+	for host, want := range map[string]int{
+		"100.101.102.103":            200, // custom host accepted
+		"100.101.102.103:8000":       200, // port stripped before matching
+		"mymac.tail1234.ts.net:8000": 200,
+		"evil.example.com":           400, // unknown host still rejected
+		"localhost:8000":             400, // a custom list replaces the default
+	} {
+		if r := e.get("/health", map[string]string{"Host": host}); r.status != want {
+			t.Fatalf("Host %s -> %d, want %d", host, r.status, want)
+		}
+	}
+}
+
+func TestAllowedHostsFromEnvEndToEnd(t *testing.T) {
+	s, err := config.FromEnv(func(name string) (string, bool) {
+		v, ok := map[string]string{"KAGI_SESSION_TOKEN": kagitest.Token, "PROXY_API_KEY": kagitest.Key,
+			"PROXY_ALLOWED_HOSTS": "box.lan:9999, 10.0.0.5"}[name]
+		return v, ok
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := kagitest.New()
+	e := newEnv(t, fake, func(settings *config.Settings) { settings.AllowedHosts = s.AllowedHosts })
+	for host, want := range map[string]int{"box.lan": 200, "box.lan:8000": 200, "10.0.0.5:1": 200, "127.0.0.1": 400} {
+		if r := e.get("/health", map[string]string{"Host": host}); r.status != want {
+			t.Fatalf("Host %s -> %d, want %d", host, r.status, want)
+		}
+	}
+}
+
+// ------------------------------------------------------ queued disconnect
+
+func TestQueuedClientDisconnectSpendsNoKagiTurn(t *testing.T) {
+	fake := kagitest.New()
+	gate := kagitest.NewGate()
+	fake.Gate, fake.PauseAfter = gate, 2 // the first turn holds the slot until released
+	e := newEnv(t, fake)
+	first := make(chan result, 1)
+	go func() {
+		r, _ := e.do(context.Background(), "POST", "/v1/chat/completions", chatBody(true, "kagi-default", nil), nil)
+		first <- r
+	}()
+	eventually(t, e.proxy.Busy, "first turn to take the slot")
+
+	// Waiter B gives up while queued; waiter C keeps waiting.
+	ctxB, cancelB := context.WithCancel(context.Background())
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := e.do(ctxB, "POST", "/v1/chat/completions", chatBody(false, "kagi-default", nil), nil)
+		bDone <- err
+	}()
+	third := make(chan result, 1)
+	time.Sleep(100 * time.Millisecond) // B is queued
+	go func() {
+		r, _ := e.do(context.Background(), "POST", "/v1/chat/completions", chatBody(false, "kagi-default", nil), nil)
+		third <- r
+	}()
+	time.Sleep(100 * time.Millisecond) // C is queued
+	cancelB()
+	if err := <-bDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("B: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // let the server notice B's hang-up
+
+	gate.Open()
+	if r := <-first; last(parseSSE(t, r.body)) != "[DONE]" {
+		t.Fatalf("first: %s", r.body)
+	}
+	if r := <-third; r.status != 200 { // the slot went to the live waiter
+		t.Fatalf("C: %d %s", r.status, r.body)
+	}
+	e.waitIdle()
+	if n := fake.Count(kagitest.Create); n != 2 { // first + C; B never reached Kagi
+		t.Fatalf("Kagi turns created: %d, calls %v", n, fake.Calls())
+	}
+	if e.proxy.Busy() {
+		t.Fatal("slot still held")
+	}
+}
+
+func TestClientGoneBeforeQueueingTakesNoFreeSlot(t *testing.T) {
+	fake := kagitest.New()
+	p := New(func() config.Settings {
+		s := config.Defaults(kagitest.Token, kagitest.Key)
+		s.KagiBaseURL = fake.URL()
+		return s
+	}())
+	defer fake.Close()
+	defer p.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := p.acquireSlot(ctx); got != slotClientGone || p.Busy() {
+		t.Fatalf("acquireSlot = %v, busy=%v", got, p.Busy())
+	}
+}
+
+// ------------------------------------------------------------ healthcheck
+
+func TestHealthCheck(t *testing.T) {
+	fake := kagitest.New()
+	s := config.Defaults(kagitest.Token, kagitest.Key)
+	s.KagiBaseURL = fake.URL()
+	s.AllowedHosts = []string{"100.101.102.103"} // the probe must still pass the allow-list
+	p := New(s)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: p}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close(); p.Close(); fake.Close() })
+
+	s.Host, s.Port = "0.0.0.0", ln.Addr().(*net.TCPAddr).Port // unspecified bind -> loopback
+	if err := HealthCheck(s, 2*time.Second); err != nil {
+		t.Fatalf("healthy server: %v", err)
+	}
+	if len(fake.Calls()) != 0 {
+		t.Fatalf("healthcheck called Kagi: %v", fake.Calls())
+	}
+	s.AllowedHosts = []string{"localhost"} // a Host the server rejects -> 400 -> unhealthy
+	if err := HealthCheck(s, 2*time.Second); err == nil {
+		t.Fatal("400 counted as healthy")
+	}
+	_ = srv.Close()
+	if err := HealthCheck(s, 2*time.Second); err == nil {
+		t.Fatal("closed port counted as healthy")
 	}
 }
