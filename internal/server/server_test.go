@@ -991,3 +991,176 @@ func TestHealthCheck(t *testing.T) {
 		t.Fatal("closed port counted as healthy")
 	}
 }
+
+// -------------------------------------------------------- reasoning effort
+
+func effortCatalog() obj {
+	return obj{"models": obj{
+		"default_model": "glm-5-3-flash",
+		"models": []any{
+			obj{"id": "glm-5-3-flash", "provider": "zai", "context_window": 128000, "supported": true, "supports_thinking": true, "reasoning_effort": []any{"low", "high", "max"}},
+			obj{"id": "ki_quick", "provider": "kagi", "supported": true, "supports_thinking": false, "reasoning_effort": []any{"none"}},
+			obj{"id": "plain", "provider": "acme", "supported": true}, // no option list: global set only
+		},
+	}}
+}
+
+func effortFake() *kagitest.Fake {
+	fake := kagitest.New()
+	fake.InitJSON = effortCatalog()
+	return fake
+}
+
+// sentEffort returns the reasoning_effort of the last Kagi POST (present=false if omitted).
+func sentEffort(t *testing.T, fake *kagitest.Fake) (effort any, present bool) {
+	t.Helper()
+	rec := fake.Request(kagitest.Create)
+	if rec == nil {
+		t.Fatal("no POST to Kagi")
+	}
+	var sent obj
+	if err := json.Unmarshal(rec.Body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	effort, present = sent["reasoning_effort"]
+	return effort, present
+}
+
+func TestReasoningEffortPrecedence(t *testing.T) {
+	for _, c := range []struct {
+		name, env, model, body string
+		want                   string // "" = field omitted
+	}{
+		{"none set: Kagi default", "", "plain", "", ""},
+		{"env default", "low", "plain", "", "low"},
+		{"suffix beats env", "low", "plain:high", "", "high"},
+		{"body beats suffix and env", "low", "plain:high:offline", "medium", "medium"},
+		{"catalog default model, no effort", "", "", "", ""},
+		{"catalog default model, body effort", "", "", "max", "max"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fake := effortFake()
+			e := newEnv(t, fake, func(s *config.Settings) { s.ReasoningEffort = c.env })
+			extra := obj{}
+			if c.body != "" {
+				extra["reasoning_effort"] = c.body
+			}
+			if r := e.post(chatBody(false, c.model, extra)); r.status != 200 {
+				t.Fatalf("%d %s", r.status, r.body)
+			}
+			effort, present := sentEffort(t, fake)
+			if c.want == "" && present {
+				t.Fatalf("reasoning_effort sent (%v), want omitted", effort)
+			}
+			if c.want != "" && effort != c.want {
+				t.Fatalf("reasoning_effort = %v (present=%v), want %q", effort, present, c.want)
+			}
+		})
+	}
+}
+
+func TestReasoningEffortValidatedAgainstModelOptions(t *testing.T) {
+	fake := effortFake()
+	e := newEnv(t, fake)
+	for _, c := range []struct {
+		model string
+		extra obj
+	}{
+		{"glm-5-3-flash", obj{"reasoning_effort": "medium"}}, // request field
+		{"glm-5-3-flash:medium", nil},                        // suffix
+		{"ki_quick:low", nil},
+	} {
+		r := e.post(chatBody(false, c.model, c.extra))
+		if r.status != 400 || r.errorField(t, "code") != "unsupported_reasoning_effort" {
+			t.Fatalf("%s %v -> %d %s", c.model, c.extra, r.status, r.body)
+		}
+	}
+	msg := e.post(chatBody(false, "glm-5-3-flash", obj{"reasoning_effort": "medium"})).errorField(t, "message").(string)
+	if !strings.Contains(msg, "supported: low, high, max") {
+		t.Fatalf("message %q does not name the supported values", msg)
+	}
+	if fake.Has(kagitest.Create) {
+		t.Fatal("rejected requests reached Kagi")
+	}
+	// Supported values, and models without an option list, pass through.
+	for model, effort := range map[string]string{"glm-5-3-flash": "max", "ki_quick": "none", "plain": "xhigh", "not-in-catalog": "minimal"} {
+		if r := e.post(chatBody(false, model, obj{"reasoning_effort": effort})); r.status != 200 {
+			t.Fatalf("%s/%s -> %d %s", model, effort, r.status, r.body)
+		}
+		if got, _ := sentEffort(t, fake); got != effort {
+			t.Fatalf("%s: sent %v, want %s", model, got, effort)
+		}
+	}
+}
+
+func TestReasoningEffortGlobalOnlyWithoutCatalog(t *testing.T) {
+	fake := effortFake()
+	fake.InitStatus = 500 // catalog never fetched
+	e := newEnv(t, fake)
+	if r := e.post(chatBody(false, "glm-5-3-flash", obj{"reasoning_effort": "medium"})); r.status != 200 {
+		t.Fatalf("%d %s", r.status, r.body)
+	}
+	if got, _ := sentEffort(t, fake); got != "medium" {
+		t.Fatalf("sent %v", got)
+	}
+	if r := e.post(chatBody(false, "glm-5-3-flash", obj{"reasoning_effort": "turbo"})); r.status != 400 || r.errorField(t, "code") != "invalid_reasoning_effort" {
+		t.Fatalf("%d %s", r.status, r.body)
+	}
+}
+
+func TestReasoningEffortGlobalOnlyWhenCatalogIsStale(t *testing.T) {
+	fake := effortFake()
+	e := newEnv(t, fake, func(s *config.Settings) { s.ModelsTTL = 0 }) // every request refreshes
+	if r := e.post(chatBody(false, "glm-5-3-flash", obj{"reasoning_effort": "medium"})); r.status != 400 {
+		t.Fatalf("fresh catalog: %d %s", r.status, r.body)
+	}
+	fake.SetInitStatus(500) // refresh fails -> the cached copy is served stale
+	if r := e.post(chatBody(false, "glm-5-3-flash", obj{"reasoning_effort": "medium"})); r.status != 200 {
+		t.Fatalf("stale catalog: %d %s", r.status, r.body)
+	}
+	if got, _ := sentEffort(t, fake); got != "medium" {
+		t.Fatalf("sent %v", got)
+	}
+}
+
+func TestEnvEffortUnsupportedByModelIsDroppedAndLoggedOnce(t *testing.T) {
+	logs := captureLogs(t)
+	fake := effortFake()
+	e := newEnv(t, fake, func(s *config.Settings) { s.ReasoningEffort = "medium" })
+	for range 2 {
+		if r := e.post(chatBody(false, "glm-5-3-flash", nil)); r.status != 200 {
+			t.Fatalf("%d %s", r.status, r.body)
+		}
+		if effort, present := sentEffort(t, fake); present {
+			t.Fatalf("unsupported env default sent: %v", effort)
+		}
+	}
+	if n := strings.Count(logs.String(), "KAGI_REASONING_EFFORT=medium is not supported by glm-5-3-flash"); n != 1 {
+		t.Fatalf("logged %d times:\n%s", n, logs)
+	}
+	e.post(chatBody(false, "plain", nil)) // still applied where allowed
+	if got, _ := sentEffort(t, fake); got != "medium" {
+		t.Fatalf("plain: sent %v", got)
+	}
+}
+
+func TestModelSuffixErrorsAre400BeforeKagi(t *testing.T) {
+	fake := effortFake()
+	e := newEnv(t, fake)
+	for _, model := range []string{"glm-5-3-flash:fast", "glm-5-3-flash:low:high", "glm-5-3-flash:online:offline"} {
+		if r := e.post(chatBody(false, model, nil)); r.status != 400 || r.errorField(t, "code") != "invalid_model_suffix" {
+			t.Fatalf("%s -> %d %s", model, r.status, r.body)
+		}
+	}
+	if fake.Has(kagitest.Create) {
+		t.Fatal("invalid suffix reached Kagi")
+	}
+}
+
+func TestModelsListShowsReasoningEffortsWithCleanIDs(t *testing.T) {
+	r := newEnv(t, effortFake()).get("/v1/models", nil)
+	mustJSONEqual(t, r.json(t), `{"object": "list", "data": [
+		{"id": "glm-5-3-flash", "object": "model", "created": 0, "owned_by": "zai", "reasoning_efforts": ["low", "high", "max"]},
+		{"id": "ki_quick", "object": "model", "created": 0, "owned_by": "kagi", "reasoning_efforts": ["none"]},
+		{"id": "plain", "object": "model", "created": 0, "owned_by": "acme"}]}`)
+}

@@ -206,3 +206,34 @@ func TestQuote(t *testing.T) {
 		t.Fatalf("quote = %q", got)
 	}
 }
+
+func TestCatalogReasoningEffortOptions(t *testing.T) {
+	obj, err := DecodeJSON([]byte(`{"models": {"models": [
+		{"id": "glm", "supported": true, "supports_thinking": true, "reasoning_effort": ["low", "high", "max"]},
+		{"id": "opus", "supported": true, "supports_thinking": true, "reasoning_effort": [{"value": "low"}, {"id": "medium"}, {"name": "high"}, {"label": "?"}]},
+		{"id": "wrapped", "supported": true, "reasoning_effort": {"options": ["low", "low", "max"], "default": "max"}},
+		{"id": "quick", "supported": true, "supports_thinking": false, "reasoning_effort": ["none"]},
+		{"id": "plain", "supported": true},
+		{"id": "odd", "supported": true, "reasoning_effort": "max"}
+	]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := ParseCatalog(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{"glm": {"low", "high", "max"}, "opus": {"low", "medium", "high"}, "wrapped": {"low", "max"}, "quick": {"none"}, "plain": nil, "odd": nil}
+	for id, efforts := range want {
+		m, _ := catalog.Get(id)
+		if !reflect.DeepEqual(m.ReasoningEfforts, efforts) {
+			t.Fatalf("%s efforts = %#v, want %#v", id, m.ReasoningEfforts, efforts)
+		}
+	}
+	if m, _ := catalog.Get("glm"); !m.SupportsThinking {
+		t.Fatal("supports_thinking not read")
+	}
+	if m, _ := catalog.Get("quick"); m.SupportsThinking {
+		t.Fatal("supports_thinking false read as true")
+	}
+}

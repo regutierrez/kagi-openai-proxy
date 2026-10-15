@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -286,12 +287,24 @@ func parseUsage(raw any) *events.Usage {
 	return usage
 }
 
+// ReasoningEfforts are the reasoning_effort values Kagi's v2 conversation API accepts
+// (verified live). Each model supports a subset, listed in /api/init. The legacy v1
+// field thinking_preset does not apply to v2.
+var ReasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// IsReasoningEffort reports whether v is one of ReasoningEfforts.
+func IsReasoningEffort(v string) bool { return slices.Contains(ReasoningEfforts, v) }
+
 // ModelInfo is one usable catalog entry.
 type ModelInfo struct {
-	ID            string
-	Provider      string // "" when absent
-	DisplayName   string
-	ContextWindow int // 0 when unknown
+	ID               string
+	Provider         string // "" when absent
+	DisplayName      string
+	ContextWindow    int // 0 when unknown
+	SupportsThinking bool
+	// ReasoningEfforts is the model's reasoning_effort option list, in catalog order;
+	// nil when the catalog does not list one (then only the global set applies).
+	ReasoningEfforts []string
 }
 
 // Catalog is the filtered /api/init model list.
@@ -340,6 +353,8 @@ func ParseCatalog(obj any) (*Catalog, error) {
 				info.ContextWindow = cw
 			}
 		}
+		info.SupportsThinking, _ = item["supports_thinking"].(bool)
+		info.ReasoningEfforts = effortOptions(item)
 		catalog.Models = append(catalog.Models, info)
 	}
 	catalog.DefaultID = findDefaultModel(root, section)
@@ -348,6 +363,39 @@ func ParseCatalog(obj any) (*Catalog, error) {
 		logx.Warn("Kagi catalog has no recognizable default model id; using %s", catalog.DefaultID)
 	}
 	return catalog, nil
+}
+
+// effortOptions reads a model's reasoning_effort option list. The verified field is
+// reasoning_effort; its exact JSON shape is not pinned down, so this accepts a list of
+// strings or of objects carrying the value under "value", "id" or "name", optionally
+// wrapped in an object under "options" / "values". Anything else -> nil (unknown).
+func effortOptions(item map[string]any) []string {
+	raw := item["reasoning_effort"]
+	if wrapper, ok := asMap(raw); ok {
+		raw = wrapper["options"]
+		if raw == nil {
+			raw = wrapper["values"]
+		}
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, entry := range list {
+		value, ok := entry.(string)
+		if m, isObject := asMap(entry); isObject {
+			for _, key := range []string{"value", "id", "name"} {
+				if value, ok = m[key].(string); ok {
+					break
+				}
+			}
+		}
+		if ok && value != "" && !slices.Contains(out, value) {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 // findDefaultModel tries the plausible spellings in the models section, then the top level.

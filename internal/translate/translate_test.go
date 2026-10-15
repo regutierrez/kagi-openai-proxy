@@ -223,15 +223,56 @@ func TestModelSuffixResolution(t *testing.T) {
 		def    bool
 		model  string
 		online bool
+		effort string
 	}{
-		{"gpt-x:online", false, "gpt-x", true},
-		{"gpt-x:offline", true, "gpt-x", false},
-		{"gpt-x", true, "gpt-x", true},
-		{"gpt-x", false, "gpt-x", false},
-		{":online", false, ":online", false},
+		{"gpt-x:online", false, "gpt-x", true, ""},
+		{"gpt-x:offline", true, "gpt-x", false, ""},
+		{"gpt-x", true, "gpt-x", true, ""},
+		{"gpt-x", false, "gpt-x", false, ""},
+		{"glm-5-3-flash:low", true, "glm-5-3-flash", true, "low"},                    // effort only
+		{"glm-5-3-flash:low:offline", true, "glm-5-3-flash", false, "low"},           // combined
+		{"glm-5-3-flash:offline:low", true, "glm-5-3-flash", false, "low"},           // order-insensitive
+		{"glm-5-3-flash:max:max:online:online", false, "glm-5-3-flash", true, "max"}, // repeats are a set
+		{"m:none", true, "m", true, "none"},
+		{"m:xhigh", true, "m", true, "xhigh"},
 	} {
-		if m, o := ResolveModel(c.in, c.def); m != c.model || o != c.online {
-			t.Fatalf("%q -> %q %v", c.in, m, o)
+		spec, err := ParseModel(c.in, c.def)
+		if err != nil || spec.Model != c.model || spec.EnableSearch != c.online || spec.ReasoningEffort != c.effort {
+			t.Fatalf("%q -> %+v, %v", c.in, spec, err)
+		}
+	}
+	for in, want := range map[string]string{
+		"glm-5-3-flash:fast":           "unknown suffix ':fast'",
+		"glm-5-3-flash:LOW":            "unknown suffix ':LOW'",
+		"glm-5-3-flash:low:":           "unknown suffix ':'",
+		"glm-5-3-flash:online:offline": "both :online and :offline",
+		"glm-5-3-flash:low:high":       "conflicting reasoning effort suffixes :low and :high",
+		":online":                      "no model id before its suffixes",
+	} {
+		_, err := ParseModel(in, true)
+		if err == nil || err.Status() != 400 || err.Code() != "invalid_model_suffix" || !strings.Contains(err.Message(), want) {
+			t.Fatalf("%q -> %v, want 400 containing %q", in, err, want)
+		}
+	}
+}
+
+func TestReasoningEffortRequestField(t *testing.T) {
+	req, err := ParseChatRequest(decode(t, `{"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "high"}`))
+	if err != nil || req.ReasoningEffort != "high" {
+		t.Fatalf("req=%+v err=%v", req, err)
+	}
+	for _, absent := range []string{``, `, "reasoning_effort": null`} {
+		if req, err := ParseChatRequest(decode(t, `{"messages": [{"role": "user", "content": "x"}]`+absent+`}`)); err != nil || req.ReasoningEffort != "" {
+			t.Fatalf("absent %q: req=%+v err=%v", absent, req, err)
+		}
+	}
+	_, err = ParseChatRequest(decode(t, `{"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "turbo"}`))
+	if err == nil || err.Code() != "invalid_reasoning_effort" || !strings.Contains(err.Message(), "none, minimal, low, medium, high, xhigh, max") {
+		t.Fatalf("err = %v", err)
+	}
+	for _, bad := range []string{`""`, `5`, `["low"]`} {
+		if _, err := ParseChatRequest(decode(t, `{"messages": [{"role": "user", "content": "x"}], "reasoning_effort": `+bad+`}`)); err == nil || err.Status() != 400 {
+			t.Fatalf("reasoning_effort %s accepted", bad)
 		}
 	}
 }

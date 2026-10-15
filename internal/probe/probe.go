@@ -202,7 +202,7 @@ func Run(ctx context.Context, client *kagi.Client, model string, out io.Writer) 
 	}
 	say("catalog: %d usable models, default=%s; probing with %s", len(catalog.Models), defaultID, model)
 
-	created, err := client.CreateTurn(ctx, Prompt, model, false, false)
+	created, err := client.CreateTurn(ctx, Prompt, model, kagi.TurnOptions{}) // search off, Kagi's default effort
 	if err != nil {
 		// A partially successful create still names the thread it made: delete it too.
 		var kerr *kagi.Error

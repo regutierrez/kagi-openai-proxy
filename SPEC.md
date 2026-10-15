@@ -13,7 +13,8 @@
 > **Go-only additions after the port** (documented in README): `PROXY_ALLOWED_HOSTS`
 > (comma-separated Host allow-list, ports stripped; empty/unset = the localhost-only list
 > below), a request queued for the turn slot abandons the wait when its client
-> disconnects (never spends a Kagi turn), a `-healthcheck` flag, and a Docker image.
+> disconnects (never spends a Kagi turn), a `-healthcheck` flag, a Docker image, and
+> reasoning-effort control (section "Reasoning effort" below).
 
 Implement exactly this spec. It has already been through an architecture review; deviations are allowed only where the spec is internally impossible — otherwise implement as written and record concerns in your final report.
 
@@ -64,6 +65,15 @@ SSE stream format:
 - `GET /v1/models` — OpenAI list format from the `/api/init` catalog (filtered as above), lazily cached with TTL (default 6h); serve stale on refresh failure; 503 if never fetched successfully.
 - `POST /v1/chat/completions` — streaming and non-streaming, OpenAI Chat Completions shapes.
 - Bind `127.0.0.1` by default. A Host allow-list (Starlette `TrustedHostMiddleware` semantics) allowing only `127.0.0.1[:port]` and `localhost[:port]`. No CORS middleware, ever.
+
+### Reasoning effort (Go addition; wire facts verified live)
+
+- Kagi wire: `POST /api/v2/conversations` accepts an optional `reasoning_effort` string. Global value set: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; each model supports a subset. The legacy v1 field `thinking_preset` does not apply to v2 and is never sent.
+- `/api/init`: each catalog model may carry `supports_thinking` (bool) and a `reasoning_effort` option list (e.g. GLM: low/high/max; an Opus-class model: low/medium/high/xhigh/max; `ki_quick`: none). Parse the list per model (tolerating a list of strings or of `{value|id|name}` objects, optionally wrapped in `{options|values: [...]}`); absent/unrecognized = unknown. `GET /v1/models` exposes it as a non-standard `reasoning_efforts` array; model ids stay plain.
+- Sources, first match wins: request-body `reasoning_effort` (string or null) > model-id effort suffix > `KAGI_REASONING_EFFORT` (validated at startup against the global set; unset = none) > none. None = omit the field (Kagi's per-model default).
+- Model-id grammar: `requested = model-id *(":" suffix)`, `suffix = "online" / "offline" / effort`. The model id is everything before the first `:`. Suffixes are a set (order-insensitive, repeats allowed); unknown tokens, `online`+`offline`, or two different efforts → 400 `invalid_model_suffix`. `online`/`offline` keep their meaning; neither = `KAGI_SEARCH_DEFAULT`.
+- Validation: a value outside the global set → 400 `invalid_reasoning_effort`. If a fresh catalog (not one being served stale after a failed refresh) lists the model's options: a request/suffix value outside them → 400 `unsupported_reasoning_effort` naming the supported values, before any Kagi call; an env default outside them is omitted for that model and logged once. Otherwise global-only validation, and Kagi's own error is mapped as usual.
+- Thinking output stays dropped (text nodes only); reasoning passthrough is a possible future option.
 
 ### Proxy auth
 

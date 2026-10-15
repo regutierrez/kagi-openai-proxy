@@ -103,3 +103,22 @@ func TestAllowedHosts(t *testing.T) {
 		t.Fatal("invalid entry accepted")
 	}
 }
+
+func TestReasoningEffortEnv(t *testing.T) {
+	load := func(vars map[string]string) (Settings, error) {
+		vars["KAGI_SESSION_TOKEN"], vars["PROXY_API_KEY"] = "tok", strings.Repeat("k", 16)
+		return FromEnv(env(vars))
+	}
+	if s, err := load(map[string]string{}); err != nil || s.ReasoningEffort != "" {
+		t.Fatalf("unset: %q %v", s.ReasoningEffort, err)
+	}
+	for raw, want := range map[string]string{"low": "low", " MAX ": "max", "": "", "none": "none"} {
+		if s, err := load(map[string]string{"KAGI_REASONING_EFFORT": raw}); err != nil || s.ReasoningEffort != want {
+			t.Fatalf("%q -> %q %v", raw, s.ReasoningEffort, err)
+		}
+	}
+	_, err := load(map[string]string{"KAGI_REASONING_EFFORT": "turbo"})
+	if err == nil || !strings.Contains(err.Error(), "KAGI_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, max") {
+		t.Fatalf("err = %v", err)
+	}
+}

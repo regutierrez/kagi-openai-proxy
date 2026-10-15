@@ -37,6 +37,9 @@ Other behaviour:
 
 - **Web search:** append `:online` or `:offline` to a model id (`some-model:offline`) to
   turn Kagi's web search on or off. With no suffix, `KAGI_SEARCH_DEFAULT` applies.
+- **Reasoning effort:** `reasoning_effort` in the request, an effort suffix such as
+  `glm-5-3-flash:low`, or `KAGI_REASONING_EFFORT`. See
+  [Reasoning effort](#reasoning-effort).
 - **Citations:** Kagi's `[^ref]` markers are renumbered `[^1]`, `[^2]`, … in order of
   first citation.
 - **Ignored inputs:** `tools`, `tool_choice`, `n`, `stop`, `seed`, `top_p`,
@@ -49,6 +52,51 @@ Other behaviour:
 - **Disconnects:** if the client hangs up (streaming or not), or after the answer ends,
   the proxy keeps reading the Kagi turn in the background (bounded, 600s) before deleting
   the thread and freeing the slot.
+
+### Reasoning effort
+
+Kagi's v2 conversation API takes a `reasoning_effort` field: `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, or `max`. Each model supports a subset. This field and its
+values were verified against live Kagi. It is a real cost and latency lever: with no
+effort set, a GLM model defaulted to `max` and spent 4,109 output tokens and 88s on an
+ordinary question. (`thinking_preset` was the legacy v1 field; it does not apply to v2
+and the proxy never sends it.)
+
+The proxy picks one effort per request, first match wins:
+
+1. `reasoning_effort` in the Chat Completions request body (OpenAI's field name);
+2. an effort suffix on the model id;
+3. `KAGI_REASONING_EFFORT`;
+4. nothing: the field is omitted and Kagi uses the model's own default.
+
+**Model id grammar.** Suffixes are a client-side convention; `/v1/models` lists plain ids.
+
+```
+requested = model-id *( ":" suffix )
+suffix    = "online" / "offline" / effort
+effort    = "none" / "minimal" / "low" / "medium" / "high" / "xhigh" / "max"
+```
+
+Suffixes form a set: any order, repeats allowed. So `glm-5-3-flash:low:offline` and
+`glm-5-3-flash:offline:low` are the same. These are 400 `invalid_model_suffix`: an
+unknown or uppercase token, `:online` together with `:offline`, and two different
+efforts. The model id is everything before the first `:`, so a Kagi id must not
+contain `:`.
+
+**Validation.** Every value must be in the set above (400 `invalid_reasoning_effort`).
+Kagi's `/api/init` catalog also lists each model's options (`supports_thinking` and a
+`reasoning_effort` list; for example GLM has low/high/max and `ki_quick` has none).
+`GET /v1/models` shows them as a non-standard `reasoning_efforts` array per model. When
+the catalog lists a model's options, a request or suffix effort outside them is a 400
+`unsupported_reasoning_effort` that names the supported values, and nothing reaches
+Kagi. An unsupported `KAGI_REASONING_EFFORT` default is not an error: for that model the
+proxy omits the field (Kagi's default) and logs it once. If the catalog is unavailable,
+is being served stale after a failed refresh, doesn't list the model, or has no option
+list for it, only the global set is checked; Kagi then rejects anything else
+(`kagi_rejected_request`).
+
+Thinking output stays dropped: only text nodes reach the answer. Passing reasoning
+through (e.g. as `reasoning_content`) is a possible future option.
 
 ### Disconnects
 
@@ -131,6 +179,7 @@ The result is one self-contained binary.
 | `KAGI_DELETE_THREADS` | `true` | Delete each Kagi thread after its turn ends |
 | `KAGI_PERSONALIZATION` | `false` | Pass Kagi's `personalization` flag |
 | `KAGI_SEARCH_DEFAULT` | `online` | Web search for model ids without a suffix (`online`/`offline`) |
+| `KAGI_REASONING_EFFORT` | *(unset)* | Default `reasoning_effort` when neither the request nor a model suffix sets one: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Validated at startup. Unset = Kagi's per-model default. Skipped (logged once) for a model whose catalog options don't include it |
 | `KAGI_MAX_CONCURRENCY` | `1` | Max concurrent Kagi turns |
 | `KAGI_QUEUE_WAIT_SECONDS` | `30` | How long a request waits for a free slot before 429 |
 | `KAGI_CONNECT_TIMEOUT` | `20` | Upstream connect timeout (seconds) |
@@ -252,8 +301,13 @@ Providers → Custom Providers*. Then copy the entry from
 [providers.yaml.example](providers.yaml.example), replacing:
 
 - the API key with your `PROXY_API_KEY`, not the Kagi token;
-- the model ids with ids from `GET /v1/models`, plus `:offline` variants if you want
-  them. Raycast does not read `/v1/models` itself, so the ids must match exactly.
+- the model ids with ids from `GET /v1/models`, plus suffixed variants if you want
+  them: `:offline`, an effort such as `:low`, or both (`glm-5-3-flash:low:offline`).
+  Raycast does not read `/v1/models` itself, so the ids must match exactly.
+
+If you enable Raycast's `reasoning_effort` ability for a model, every value Raycast
+sends must be in that model's `reasoning_efforts` list from `/v1/models`, or the proxy
+answers 400. A request-body effort overrides the model's suffix.
 
 Leave `tools` and `vision` unsupported and do not add a top-level `tools:` block. The
 proxy ignores tools and replaces images with a placeholder.
@@ -270,6 +324,9 @@ All errors use the OpenAI shape `{"error": {"message", "type", "param", "code"}}
 | Kagi 429 or a quota-like turn failure | 429 | `rate_limit_error` |
 | Proxy busy longer than `KAGI_QUEUE_WAIT_SECONDS` | 429 | `rate_limit_error` / `proxy_busy` |
 | Kagi rejected the request (e.g. unknown model) | 400 | `invalid_request_error` / `kagi_rejected_request` |
+| Unknown or conflicting model suffix | 400 | `invalid_request_error` / `invalid_model_suffix` |
+| `reasoning_effort` not in the global set | 400 | `invalid_request_error` / `invalid_reasoning_effort` |
+| Effort not in the model's catalog options | 400 | `invalid_request_error` / `unsupported_reasoning_effort` |
 | Unexpected Kagi response shape, or a malformed stream frame | 502 | `api_error` / `kagi_protocol_drift` |
 | Turn finished with no answer text | 502 | `api_error` / `kagi_empty_answer` |
 

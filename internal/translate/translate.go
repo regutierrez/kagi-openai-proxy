@@ -14,6 +14,7 @@ import (
 
 	"kagiopenaiproxy/internal/citations"
 	"kagiopenaiproxy/internal/events"
+	"kagiopenaiproxy/internal/kagi"
 	"kagiopenaiproxy/internal/logx"
 	"kagiopenaiproxy/internal/redact"
 	"kagiopenaiproxy/internal/textutil"
@@ -65,7 +66,7 @@ func InvalidRequest(message string) *TurnError {
 
 // ------------------------------------------------------------------ request parsing
 
-var handledParams = map[string]bool{"model": true, "messages": true, "stream": true, "stream_options": true, "temperature": true}
+var handledParams = map[string]bool{"model": true, "messages": true, "stream": true, "stream_options": true, "temperature": true, "reasoning_effort": true}
 
 var (
 	loggedIgnoredMu sync.Mutex
@@ -106,6 +107,9 @@ type ChatRequest struct {
 	Messages     []Message
 	Stream       bool
 	IncludeUsage bool
+	// ReasoningEffort is the request's reasoning_effort ("" when absent or null); it is
+	// already checked against the global value set.
+	ReasoningEffort string
 }
 
 // DecodeBody parses a request body, keeping numbers as json.Number.
@@ -183,6 +187,17 @@ func ParseChatRequest(body any) (ChatRequest, *TurnError) {
 			return ChatRequest{}, InvalidRequest("'temperature' must be a number")
 		}
 	}
+	if raw := obj["reasoning_effort"]; raw != nil {
+		effort, ok := raw.(string)
+		if !ok {
+			return ChatRequest{}, InvalidRequest("'reasoning_effort' must be a string")
+		}
+		if !kagi.IsReasoningEffort(effort) {
+			return ChatRequest{}, invalidEffort(fmt.Sprintf("'reasoning_effort' %s is not supported; use one of: %s",
+				textutil.Repr(effort), strings.Join(kagi.ReasoningEfforts, ", ")))
+		}
+		req.ReasoningEffort = effort
+	}
 	if raw := obj["stream"]; raw != nil {
 		stream, ok := raw.(bool)
 		if !ok {
@@ -229,18 +244,67 @@ func ParseChatRequest(body any) (ChatRequest, *TurnError) {
 	return req, nil
 }
 
-// ResolveModel strips a ":online" / ":offline" suffix: "gpt-x:offline" -> ("gpt-x", false).
-// Without a suffix the configured default applies.
-func ResolveModel(requested string, defaultOnline bool) (string, bool) {
-	for _, s := range []struct {
-		suffix string
-		online bool
-	}{{":online", true}, {":offline", false}} {
-		if strings.HasSuffix(requested, s.suffix) && len(requested) > len(s.suffix) {
-			return strings.TrimSuffix(requested, s.suffix), s.online
+func invalidEffort(message string) *TurnError {
+	return NewTurnError(400, "invalid_request_error", "invalid_reasoning_effort", message)
+}
+
+func invalidSuffix(message string) *TurnError {
+	return NewTurnError(400, "invalid_request_error", "invalid_model_suffix", message)
+}
+
+// ModelSpec is a requested model id resolved into the Kagi model and per-turn knobs.
+type ModelSpec struct {
+	Model        string
+	EnableSearch bool
+	// ReasoningEffort is set by an effort suffix ("" when none).
+	ReasoningEffort string
+}
+
+// ParseModel resolves a requested model id. Grammar:
+//
+//	requested = model-id *( ":" suffix )
+//	suffix    = "online" / "offline" / effort
+//	effort    = "none" / "minimal" / "low" / "medium" / "high" / "xhigh" / "max"
+//
+// The model id is everything before the first ":", so Kagi ids must not contain ":".
+// Suffixes are a set: any order, repeats allowed, conflicting values (online+offline,
+// two different efforts) and unknown tokens are 400s. Without online/offline the
+// configured default applies. Example: "glm-5-3-flash:offline:low".
+func ParseModel(requested string, defaultOnline bool) (ModelSpec, *TurnError) {
+	parts := strings.Split(requested, ":")
+	spec := ModelSpec{Model: parts[0], EnableSearch: defaultOnline}
+	if spec.Model == "" {
+		return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has no model id before its suffixes", textutil.Repr(requested)))
+	}
+	search := ""
+	for _, token := range parts[1:] {
+		switch {
+		case token == "online" || token == "offline":
+			if search != "" && search != token {
+				return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has both :online and :offline", textutil.Repr(requested)))
+			}
+			search = token
+		case kagi.IsReasoningEffort(token):
+			if spec.ReasoningEffort != "" && spec.ReasoningEffort != token {
+				return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has conflicting reasoning effort suffixes :%s and :%s",
+					textutil.Repr(requested), spec.ReasoningEffort, token))
+			}
+			spec.ReasoningEffort = token
+		default:
+			return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has unknown suffix %s; suffixes are online, offline, or a reasoning effort (%s)",
+				textutil.Repr(requested), textutil.Repr(":"+token), strings.Join(kagi.ReasoningEfforts, ", ")))
 		}
 	}
-	return requested, defaultOnline
+	if search != "" {
+		spec.EnableSearch = search == "online"
+	}
+	return spec, nil
+}
+
+// UnsupportedEffort is the 400 for an effort the model's catalog entry does not list.
+func UnsupportedEffort(model, effort string, supported []string) *TurnError {
+	return NewTurnError(400, "invalid_request_error", "unsupported_reasoning_effort", fmt.Sprintf(
+		"model %s does not support reasoning_effort %s; supported: %s", textutil.Repr(model), textutil.Repr(effort), strings.Join(supported, ", ")))
 }
 
 // ---------------------------------------------------------------------- flattening

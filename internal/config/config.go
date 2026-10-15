@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"kagiopenaiproxy/internal/kagi"
 	"kagiopenaiproxy/internal/textutil"
 )
 
@@ -28,11 +29,14 @@ type Settings struct {
 	DeleteThreads       bool
 	Personalization     bool
 	SearchDefaultOnline bool
-	MaxConcurrency      int
-	QueueWait           time.Duration
-	ConnectTimeout      time.Duration
-	ReadTimeout         time.Duration
-	ModelsTTL           time.Duration
+	// ReasoningEffort is KAGI_REASONING_EFFORT: the effort used when neither the request
+	// nor a model suffix sets one. "" = omit the field (Kagi's per-model default).
+	ReasoningEffort string
+	MaxConcurrency  int
+	QueueWait       time.Duration
+	ConnectTimeout  time.Duration
+	ReadTimeout     time.Duration
+	ModelsTTL       time.Duration
 	// Internal tuning knobs; not part of the documented env surface.
 	Keepalive    time.Duration
 	DrainTimeout time.Duration
@@ -144,6 +148,14 @@ func FromEnv(get Lookup) (Settings, error) {
 	s.SearchDefaultOnline = search == "online"
 	if raw, ok := get("PROXY_HOST"); ok && textutil.Strip(raw) != "" {
 		s.Host = textutil.Strip(raw)
+	}
+	if raw, ok := get("KAGI_REASONING_EFFORT"); ok {
+		effort := strings.ToLower(textutil.Strip(raw))
+		if effort != "" && !kagi.IsReasoningEffort(effort) {
+			return Settings{}, errorf("KAGI_REASONING_EFFORT must be one of %s (or empty), got %s",
+				strings.Join(kagi.ReasoningEfforts, ", "), textutil.Repr(raw))
+		}
+		s.ReasoningEffort = effort
 	}
 	if raw, ok := get("PROXY_ALLOWED_HOSTS"); ok {
 		hosts, err := parseAllowedHosts(raw)

@@ -9,6 +9,12 @@
 #   The ids below are placeholders; replace them with ids from that list.
 # - Append ":offline" to an id to turn Kagi web search off for that entry
 #   (":online" forces it on; no suffix uses KAGI_SEARCH_DEFAULT).
+# - Append a reasoning effort to pin it per entry, e.g. "glm-5-3-flash:low" or
+#   "glm-5-3-flash:low:offline" (suffix order does not matter). Each model supports
+#   only some efforts: see "reasoning_efforts" in /v1/models.
+# - reasoning_effort ability: enable it only if every value Raycast sends is in the
+#   model's reasoning_efforts list; otherwise the proxy answers 400. Without it, use a
+#   suffix or KAGI_REASONING_EFFORT.
 # - Do not add a top-level `tools:` block and keep tools/vision unsupported: the proxy
 #   ignores tools and replaces images with "[image omitted]" in v0.1.
 

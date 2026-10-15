@@ -20,6 +20,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,6 +107,9 @@ type Proxy struct {
 	baseCtx    context.Context
 	cancelBase context.CancelFunc
 	handler    http.Handler
+	// envEffortSkipped remembers models whose catalog rejects KAGI_REASONING_EFFORT
+	// (logged once per model).
+	envEffortSkipped sync.Map
 }
 
 // New builds a Proxy and registers its secrets for redaction.
@@ -302,6 +306,9 @@ type modelEntry struct {
 	Object  string `json:"object"`
 	Created int    `json:"created"`
 	OwnedBy string `json:"owned_by"`
+	// ReasoningEfforts is a non-standard extra: the model's reasoning_effort options from
+	// the catalog (omitted when unknown). Ids stay clean; suffixes are client-side.
+	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
 }
 
 func (p *Proxy) listModels(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +326,7 @@ func (p *Proxy) listModels(w http.ResponseWriter, r *http.Request) {
 		if owner == "" {
 			owner = "kagi"
 		}
-		data = append(data, modelEntry{m.ID, "model", 0, owner})
+		data = append(data, modelEntry{m.ID, "model", 0, owner, m.ReasoningEfforts})
 	}
 	writeJSON(w, 200, struct {
 		Object string       `json:"object"`
@@ -395,18 +402,33 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	catalog, _ := p.catalog.get(context.WithoutCancel(r.Context()))
-	var responseModel, modelID string
-	var enableSearch bool
+	catalog, staleReason := p.catalog.get(context.WithoutCancel(r.Context()))
+	var responseModel string
+	var spec translate.ModelSpec
 	if chat.Model == "" {
 		if catalog == nil || catalog.DefaultID == "" {
 			writeError(w, translate.NewTurnError(503, "api_error", "kagi_catalog_unavailable", "no model given and the Kagi model catalog is unavailable"))
 			return
 		}
-		responseModel, modelID, enableSearch = catalog.DefaultID, catalog.DefaultID, settings.SearchDefaultOnline
+		responseModel = catalog.DefaultID
+		spec = translate.ModelSpec{Model: catalog.DefaultID, EnableSearch: settings.SearchDefaultOnline}
 	} else {
 		responseModel = chat.Model
-		modelID, enableSearch = translate.ResolveModel(chat.Model, settings.SearchDefaultOnline)
+		if spec, terr = translate.ParseModel(chat.Model, settings.SearchDefaultOnline); terr != nil {
+			writeError(w, terr)
+			return
+		}
+	}
+	modelID := spec.Model
+	// Per-model effort lists are only trusted from a catalog that is not being served stale.
+	var trusted *kagi.Catalog
+	if staleReason == "" {
+		trusted = catalog
+	}
+	effort, terr := p.resolveEffort(trusted, modelID, chat.ReasoningEffort, spec.ReasoningEffort)
+	if terr != nil {
+		writeError(w, terr)
+		return
 	}
 	contextWindow := 0
 	if catalog != nil {
@@ -425,7 +447,9 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			"another Kagi turn is in progress; waited %ss for a free slot", strconv.FormatFloat(settings.QueueWait.Seconds(), 'g', -1, 64))))
 		return
 	}
-	runner, terr := p.startTurn(content, modelID, enableSearch)
+	runner, terr := p.startTurn(content, modelID, kagi.TurnOptions{
+		EnableSearch: spec.EnableSearch, Personalization: settings.Personalization, ReasoningEffort: effort,
+	})
 	if terr != nil {
 		writeError(w, terr)
 		return
@@ -439,9 +463,40 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	p.complete(w, r, runner, formatter)
 }
 
+// resolveEffort picks the reasoning effort with precedence request field > model suffix
+// > KAGI_REASONING_EFFORT > none ("" = omit the field, Kagi's per-model default). All
+// sources are already in the global value set. When catalog (nil if unavailable or
+// stale) lists the model's options, an explicit request/suffix value outside them is a
+// 400 naming the supported values, while an unsupported env default is dropped for that
+// model (logged once). Otherwise only the global set applies.
+func (p *Proxy) resolveEffort(catalog *kagi.Catalog, modelID, fromRequest, fromSuffix string) (string, *translate.TurnError) {
+	effort, explicit := fromRequest, true
+	if effort == "" {
+		effort = fromSuffix
+	}
+	if effort == "" {
+		effort, explicit = p.settings.ReasoningEffort, false
+	}
+	if effort == "" || catalog == nil {
+		return effort, nil
+	}
+	info, ok := catalog.Get(modelID)
+	if !ok || info.ReasoningEfforts == nil || slices.Contains(info.ReasoningEfforts, effort) {
+		return effort, nil
+	}
+	if explicit {
+		return "", translate.UnsupportedEffort(modelID, effort, info.ReasoningEfforts)
+	}
+	if _, seen := p.envEffortSkipped.LoadOrStore(modelID, true); !seen {
+		logx.Warn("KAGI_REASONING_EFFORT=%s is not supported by %s (supports: %s); using Kagi's default effort for it",
+			effort, modelID, strings.Join(info.ReasoningEfforts, ", "))
+	}
+	return "", nil
+}
+
 // startTurn creates the Kagi turn and opens its stream while holding the slot. On
 // success the slot belongs to the returned runner; on failure it is released here.
-func (p *Proxy) startTurn(content, modelID string, enableSearch bool) (*turnRunner, *translate.TurnError) {
+func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turnRunner, *translate.TurnError) {
 	settings := p.settings
 	turnCtx, cancelTurn := context.WithCancel(p.baseCtx)
 	cleanupCtx := context.WithoutCancel(p.baseCtx)
@@ -450,7 +505,7 @@ func (p *Proxy) startTurn(content, modelID string, enableSearch bool) (*turnRunn
 		p.releaseSlot()
 		return kagiErrorToOpenAI(kerr)
 	}
-	created, err := p.kagi.CreateTurn(turnCtx, content, modelID, enableSearch, settings.Personalization)
+	created, err := p.kagi.CreateTurn(turnCtx, content, modelID, opts)
 	if err != nil {
 		var kerr *kagi.Error
 		errors.As(err, &kerr)
