@@ -1,0 +1,6 @@
+/kagi-openai-proxy
+/probe
+/dist/
+.env
+*.test
+*.out

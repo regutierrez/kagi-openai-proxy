@@ -1,0 +1,34 @@
+id: 1
+event: message
+data: {"event":{"type":"turn.started","node_id":null,"turn_id":"turn-1","timestamp":"2026-10-14T10:00:00.000Z","payload":{}}}
+
+data: {"event":{"type":"node.created","node_id":"n-think","turn_id":"turn-1","timestamp":"2026-10-14T10:00:01.000Z","payload":{"kind":"thinking"}},"title":"Capital of France"}
+
+data: {"event":{"type":"node.delta","node_id":"n-think","turn_id":"turn-1","timestamp":"2026-10-14T10:00:02.000Z","payload":{"delta":"The user asks about Paris. I should cite sources."}}}
+
+data: {"event":{"type":"node.delta","node_id":"n-think","turn_id":"turn-1","timestamp":"2026-10-14T10:00:03.000Z","payload":{"delta":" Population figures [^r_a1] vary."}}}
+
+data: {"event":{"type":"node.created","node_id":"n-act","turn_id":"turn-1","timestamp":"2026-10-14T10:00:04.000Z","payload":{"kind":"activity","label":"Searching the web"}}}
+
+data: {"event":{"type":"node.delta","node_id":"n-act","turn_id":"turn-1","timestamp":"2026-10-14T10:00:05.000Z","payload":{"delta":"Searching: population of Paris"}}}
+
+: ping
+data: {"event":{"type":"reference.added","node_id":"n-act","turn_id":"turn-1","timestamp":"2026-10-14T10:00:06.000Z","payload":{"ref_id":"r_a1","url":"https://example.org/paris-population","title":"Paris population 2025","snippet":"About 2.1 million"}}}
+
+data: {"event":{"type":"reference.added","node_id":"n-act","turn_id":"turn-1","timestamp":"2026-10-14T10:00:07.000Z"
+data: ,"payload":{"ref_id":"r_b2","url":"https://example.org/france","title":"France - Government","snippet":"Paris is the capital"}}}
+
+data: {"event":{"type":"node.created","node_id":"n-text","turn_id":"turn-1","timestamp":"2026-10-14T10:00:08.000Z","payload":{"kind":"text"}}}
+
+data: {"event":{"type":"node.delta","node_id":"n-text","turn_id":"turn-1","timestamp":"2026-10-14T10:00:09.000Z","payload":{"delta":" The capital of France is Paris"}}}
+
+data: {"event":{"type":"node.delta","node_id":"n-text","turn_id":"turn-1","timestamp":"2026-10-14T10:00:10.000Z","payload":{"delta":" [^r_b"}}}
+
+data: {"event":{"type":"node.delta","node_id":"n-text","turn_id":"turn-1","timestamp":"2026-10-14T10:00:11.000Z","payload":{"delta":"2#p3]. About 2.1 million people live there[^r_a1]"}}}
+
+data: {"event":{"type":"node.delta","node_id":"n-text","turn_id":"turn-1","timestamp":"2026-10-14T10:00:12.000Z","payload":{"delta":", and it hosts the national government[^r_b2]."}}}
+
+data: {"event":{"type":"turn.completed","node_id":null,"turn_id":"turn-1","timestamp":"2026-10-14T10:00:13.000Z","payload":{"usage":{"input_tokens":412,"output_tokens":37,"cost_usd":0.00184,"model_version":"example-model-2026-09-01"}}}}
+
+data: {"is_final":true}
+

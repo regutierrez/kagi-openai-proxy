@@ -1,0 +1,53 @@
+# Raycast Custom Providers config for kagi-openai-proxy.
+# Copy the provider entry below into ~/.config/raycast/ai/providers.yaml
+# (Raycast: Settings -> AI -> Models & Providers -> Custom Providers -> Reveal Providers Config).
+#
+# - base_url points at the local proxy (no /chat/completions suffix).
+# - The api key is your PROXY_API_KEY, NOT your Kagi session token.
+# - Model ids must be Kagi model ids: list them with
+#     curl -s -H "Authorization: Bearer $PROXY_API_KEY" http://127.0.0.1:8000/v1/models
+#   The ids below are placeholders; replace them with ids from that list.
+# - Append ":offline" to an id to turn Kagi web search off for that entry
+#   (":online" forces it on; no suffix uses KAGI_SEARCH_DEFAULT).
+# - Do not add a top-level `tools:` block and keep tools/vision unsupported: the proxy
+#   ignores tools and replaces images with "[image omitted]" in v0.1.
+
+providers:
+  - id: kagi
+    name: Kagi Assistant (local proxy)
+    base_url: http://127.0.0.1:8000/v1
+    api_keys:
+      kagi: REPLACE_WITH_YOUR_PROXY_API_KEY
+    models:
+      - id: REPLACE_WITH_KAGI_MODEL_ID
+        name: Kagi – Model (web search)
+        provider: kagi
+        description: Kagi Assistant with web search
+        context: 128000
+        abilities:
+          temperature:
+            supported: false   # accepted by the proxy but ignored by Kagi
+          vision:
+            supported: false
+          system_message:
+            supported: true
+          tools:
+            supported: false
+          reasoning_effort:
+            supported: false
+      - id: REPLACE_WITH_KAGI_MODEL_ID:offline
+        name: Kagi – Model (no search)
+        provider: kagi
+        description: Kagi Assistant without web search
+        context: 128000
+        abilities:
+          temperature:
+            supported: false
+          vision:
+            supported: false
+          system_message:
+            supported: true
+          tools:
+            supported: false
+          reasoning_effort:
+            supported: false
