@@ -309,6 +309,8 @@ type modelEntry struct {
 	// ReasoningEfforts is a non-standard extra: the model's reasoning_effort options from
 	// the catalog (omitted when unknown). Ids stay clean; suffixes are client-side.
 	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+	// ReasoningEffortDefault is the model's default effort (omitted when null/absent).
+	ReasoningEffortDefault string `json:"reasoning_effort_default,omitempty"`
 }
 
 func (p *Proxy) listModels(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +328,7 @@ func (p *Proxy) listModels(w http.ResponseWriter, r *http.Request) {
 		if owner == "" {
 			owner = "kagi"
 		}
-		data = append(data, modelEntry{m.ID, "model", 0, owner, m.ReasoningEfforts})
+		data = append(data, modelEntry{m.ID, "model", 0, owner, m.ReasoningEfforts, m.ReasoningEffortDefault})
 	}
 	writeJSON(w, 200, struct {
 		Object string       `json:"object"`

@@ -994,13 +994,20 @@ func TestHealthCheck(t *testing.T) {
 
 // -------------------------------------------------------- reasoning effort
 
+// effortParams is the verified /api/init shape: parameters.reasoning_effort.
+func effortParams(def any, options ...any) obj {
+	return obj{"reasoning_effort": obj{"options": options, "default": def}}
+}
+
 func effortCatalog() obj {
 	return obj{"models": obj{
 		"default_model": "glm-5-3-flash",
 		"models": []any{
-			obj{"id": "glm-5-3-flash", "provider": "zai", "context_window": 128000, "supported": true, "supports_thinking": true, "reasoning_effort": []any{"low", "high", "max"}},
-			obj{"id": "ki_quick", "provider": "kagi", "supported": true, "supports_thinking": false, "reasoning_effort": []any{"none"}},
-			obj{"id": "plain", "provider": "acme", "supported": true}, // no option list: global set only
+			obj{"id": "glm-5-3-flash", "provider": "zai", "context_window": 128000, "supported": true, "supports_thinking": true, "parameters": effortParams("max", "low", "high", "max")},
+			obj{"id": "claude-haiku", "provider": "anthropic", "supported": true, "supports_thinking": true, "parameters": effortParams("low", "none", "low", "medium", "high", "max")},
+			obj{"id": "minimax-m3", "provider": "minimax", "supported": true, "parameters": effortParams(nil, "low", "high")},
+			obj{"id": "ki_quick", "provider": "kagi", "supported": true, "supports_thinking": false, "parameters": obj{"reasoning_effort": nil}},
+			obj{"id": "plain", "provider": "acme", "supported": true}, // no parameters: global set only
 		},
 	}}
 }
@@ -1067,8 +1074,8 @@ func TestReasoningEffortValidatedAgainstModelOptions(t *testing.T) {
 		extra obj
 	}{
 		{"glm-5-3-flash", obj{"reasoning_effort": "medium"}}, // request field
-		{"glm-5-3-flash:medium", nil},                        // suffix
-		{"ki_quick:low", nil},
+		{"glm-5-3-flash:medium", nil},                        // suffix (Kagi itself would accept it)
+		{"minimax-m3:max", nil},
 	} {
 		r := e.post(chatBody(false, c.model, c.extra))
 		if r.status != 400 || r.errorField(t, "code") != "unsupported_reasoning_effort" {
@@ -1083,7 +1090,7 @@ func TestReasoningEffortValidatedAgainstModelOptions(t *testing.T) {
 		t.Fatal("rejected requests reached Kagi")
 	}
 	// Supported values, and models without an option list, pass through.
-	for model, effort := range map[string]string{"glm-5-3-flash": "max", "ki_quick": "none", "plain": "xhigh", "not-in-catalog": "minimal"} {
+	for model, effort := range map[string]string{"glm-5-3-flash": "max", "claude-haiku": "none", "ki_quick": "xhigh", "plain": "xhigh", "not-in-catalog": "minimal"} {
 		if r := e.post(chatBody(false, model, obj{"reasoning_effort": effort})); r.status != 200 {
 			t.Fatalf("%s/%s -> %d %s", model, effort, r.status, r.body)
 		}
@@ -1160,7 +1167,39 @@ func TestModelSuffixErrorsAre400BeforeKagi(t *testing.T) {
 func TestModelsListShowsReasoningEffortsWithCleanIDs(t *testing.T) {
 	r := newEnv(t, effortFake()).get("/v1/models", nil)
 	mustJSONEqual(t, r.json(t), `{"object": "list", "data": [
-		{"id": "glm-5-3-flash", "object": "model", "created": 0, "owned_by": "zai", "reasoning_efforts": ["low", "high", "max"]},
-		{"id": "ki_quick", "object": "model", "created": 0, "owned_by": "kagi", "reasoning_efforts": ["none"]},
+		{"id": "glm-5-3-flash", "object": "model", "created": 0, "owned_by": "zai", "reasoning_efforts": ["low", "high", "max"], "reasoning_effort_default": "max"},
+		{"id": "claude-haiku", "object": "model", "created": 0, "owned_by": "anthropic", "reasoning_efforts": ["none", "low", "medium", "high", "max"], "reasoning_effort_default": "low"},
+		{"id": "minimax-m3", "object": "model", "created": 0, "owned_by": "minimax", "reasoning_efforts": ["low", "high"]},
+		{"id": "ki_quick", "object": "model", "created": 0, "owned_by": "kagi"},
 		{"id": "plain", "object": "model", "created": 0, "owned_by": "acme"}]}`)
+}
+
+func TestModelsListLiveCatalogMix(t *testing.T) {
+	// Like live Kagi: 14 models with parameters.reasoning_effort, 2 with null.
+	var models []any
+	for i := range 14 {
+		models = append(models, obj{"id": fmt.Sprintf("thinker-%d", i), "supported": true, "parameters": effortParams("high", "low", "high")})
+	}
+	models = append(models, obj{"id": "ki_quick", "supported": true, "parameters": obj{"reasoning_effort": nil}},
+		obj{"id": "mistral-large", "supported": true, "parameters": obj{"reasoning_effort": nil}})
+	fake := kagitest.New()
+	fake.InitJSON = obj{"models": obj{"default_model": "thinker-0", "models": models}}
+	data := newEnv(t, fake).get("/v1/models", nil).json(t)["data"].([]any)
+	with := 0
+	for _, raw := range data {
+		m := raw.(map[string]any)
+		efforts, has := m["reasoning_efforts"]
+		switch {
+		case strings.HasPrefix(m["id"].(string), "thinker-"):
+			if !has || fmt.Sprint(efforts) != "[low high]" || m["reasoning_effort_default"] != "high" {
+				t.Fatalf("%v", m)
+			}
+			with++
+		case has || m["reasoning_effort_default"] != nil:
+			t.Fatalf("null-effort model lists efforts: %v", m)
+		}
+	}
+	if len(data) != 16 || with != 14 {
+		t.Fatalf("models=%d with efforts=%d", len(data), with)
+	}
 }

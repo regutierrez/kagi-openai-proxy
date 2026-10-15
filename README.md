@@ -84,12 +84,17 @@ efforts. The model id is everything before the first `:`, so a Kagi id must not
 contain `:`.
 
 **Validation.** Every value must be in the set above (400 `invalid_reasoning_effort`).
-Kagi's `/api/init` catalog also lists each model's options (`supports_thinking` and a
-`reasoning_effort` list; for example GLM has low/high/max and `ki_quick` has none).
-`GET /v1/models` shows them as a non-standard `reasoning_efforts` array per model. When
-the catalog lists a model's options, a request or suffix effort outside them is a 400
-`unsupported_reasoning_effort` that names the supported values, and nothing reaches
-Kagi. An unsupported `KAGI_REASONING_EFFORT` default is not an error: for that model the
+Kagi's `/api/init` catalog also lists each model's options, in
+`parameters.reasoning_effort = {"options": [...], "default": ...}` (verified live). For
+example GLM has low/high/max with default max, an Opus-class model low…max with default
+high, and Haiku none…max with default low. The default can be `null`, and some models
+(`ki_quick`, `mistral-large`) have `parameters.reasoning_effort: null`, meaning no list.
+`GET /v1/models` shows them as non-standard `reasoning_efforts` and
+`reasoning_effort_default` fields per model, each omitted when there's nothing to show.
+When the catalog lists a model's options, a request or suffix effort outside them is a
+400 `unsupported_reasoning_effort` that names the supported values, and nothing reaches
+Kagi. This check is the only guard: Kagi itself silently accepts efforts outside a
+model's list (verified: `glm-5-3-flash` with `medium` returned 200). An unsupported `KAGI_REASONING_EFFORT` default is not an error: for that model the
 proxy omits the field (Kagi's default) and logs it once. If the catalog is unavailable,
 is being served stale after a failed refresh, doesn't list the model, or has no option
 list for it, only the global set is checked; Kagi then rejects anything else

@@ -305,6 +305,8 @@ type ModelInfo struct {
 	// ReasoningEfforts is the model's reasoning_effort option list, in catalog order;
 	// nil when the catalog does not list one (then only the global set applies).
 	ReasoningEfforts []string
+	// ReasoningEffortDefault is the model's default effort ("" when null or absent).
+	ReasoningEffortDefault string
 }
 
 // Catalog is the filtered /api/init model list.
@@ -354,7 +356,7 @@ func ParseCatalog(obj any) (*Catalog, error) {
 			}
 		}
 		info.SupportsThinking, _ = item["supports_thinking"].(bool)
-		info.ReasoningEfforts = effortOptions(item)
+		info.ReasoningEfforts, info.ReasoningEffortDefault = effortOptions(item)
 		catalog.Models = append(catalog.Models, info)
 	}
 	catalog.DefaultID = findDefaultModel(root, section)
@@ -365,13 +367,24 @@ func ParseCatalog(obj any) (*Catalog, error) {
 	return catalog, nil
 }
 
-// effortOptions reads a model's reasoning_effort option list. The verified field is
-// reasoning_effort; its exact JSON shape is not pinned down, so this accepts a list of
-// strings or of objects carrying the value under "value", "id" or "name", optionally
-// wrapped in an object under "options" / "values". Anything else -> nil (unknown).
-func effortOptions(item map[string]any) []string {
-	raw := item["reasoning_effort"]
+// effortOptions reads a model's reasoning_effort options and default. The live shape
+// (verified) is model.parameters.reasoning_effort = {"options": [...], "default": "max"}
+// or null; default may be null. When parameters carries the key, it decides (null ->
+// no list). Only if it is absent are older guesses tried as fallbacks: a top-level
+// reasoning_effort holding a list (of strings or {value|id|name} objects), optionally
+// wrapped in {"options"|"values": [...]}. Anything else -> nil (unknown).
+func effortOptions(item map[string]any) (options []string, def string) {
+	raw, found := item["reasoning_effort"]
+	if params, ok := asMap(item["parameters"]); ok {
+		if v, present := params["reasoning_effort"]; present {
+			raw, found = v, true
+		}
+	}
+	if !found {
+		return nil, ""
+	}
 	if wrapper, ok := asMap(raw); ok {
+		def, _ = wrapper["default"].(string)
 		raw = wrapper["options"]
 		if raw == nil {
 			raw = wrapper["values"]
@@ -379,9 +392,8 @@ func effortOptions(item map[string]any) []string {
 	}
 	list, ok := raw.([]any)
 	if !ok {
-		return nil
+		return nil, def
 	}
-	var out []string
 	for _, entry := range list {
 		value, ok := entry.(string)
 		if m, isObject := asMap(entry); isObject {
@@ -391,11 +403,11 @@ func effortOptions(item map[string]any) []string {
 				}
 			}
 		}
-		if ok && value != "" && !slices.Contains(out, value) {
-			out = append(out, value)
+		if ok && value != "" && !slices.Contains(options, value) {
+			options = append(options, value)
 		}
 	}
-	return out
+	return options, def
 }
 
 // findDefaultModel tries the plausible spellings in the models section, then the top level.

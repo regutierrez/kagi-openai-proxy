@@ -207,7 +207,47 @@ func TestQuote(t *testing.T) {
 	}
 }
 
-func TestCatalogReasoningEffortOptions(t *testing.T) {
+func TestCatalogReasoningEffortLiveShape(t *testing.T) {
+	// Verified /api/init shape: parameters.reasoning_effort = {"options": [...], "default": ...} or null.
+	obj, err := DecodeJSON([]byte(`{"models": {"models": [
+		{"id": "glm-5-3-flash", "supported": true, "supports_thinking": true, "parameters": {"reasoning_effort": {"options": ["low", "high", "max"], "default": "max"}}},
+		{"id": "claude-haiku", "supported": true, "parameters": {"reasoning_effort": {"options": ["none", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "low"}}},
+		{"id": "opus", "supported": true, "parameters": {"reasoning_effort": {"options": ["low", "medium", "high", "xhigh", "max"]}}},
+		{"id": "minimax-m3", "supported": true, "parameters": {"reasoning_effort": {"options": ["low", "high"], "default": null}}},
+		{"id": "ki_quick", "supported": true, "parameters": {"reasoning_effort": null}},
+		{"id": "mistral-large", "supported": true, "parameters": {"reasoning_effort": null}, "reasoning_effort": ["low"]},
+		{"id": "other-params", "supported": true, "parameters": {"temperature": 1}},
+		{"id": "no-params", "supported": true}
+	]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := ParseCatalog(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]struct {
+		options []string
+		def     string
+	}{
+		"glm-5-3-flash": {[]string{"low", "high", "max"}, "max"},
+		"claude-haiku":  {ReasoningEfforts, "low"},
+		"opus":          {[]string{"low", "medium", "high", "xhigh", "max"}, ""}, // default absent
+		"minimax-m3":    {[]string{"low", "high"}, ""},                           // default null
+		"ki_quick":      {nil, ""},                                               // null: no list
+		"mistral-large": {nil, ""},                                               // null under parameters wins over a top-level guess
+		"other-params":  {nil, ""},
+		"no-params":     {nil, ""},
+	} {
+		m, _ := catalog.Get(id)
+		if !reflect.DeepEqual(m.ReasoningEfforts, want.options) || m.ReasoningEffortDefault != want.def {
+			t.Fatalf("%s: options %#v default %q, want %#v %q", id, m.ReasoningEfforts, m.ReasoningEffortDefault, want.options, want.def)
+		}
+	}
+}
+
+// Older shape guesses, kept as fallbacks when parameters.reasoning_effort is absent.
+func TestCatalogReasoningEffortFallbackShapes(t *testing.T) {
 	obj, err := DecodeJSON([]byte(`{"models": {"models": [
 		{"id": "glm", "supported": true, "supports_thinking": true, "reasoning_effort": ["low", "high", "max"]},
 		{"id": "opus", "supported": true, "supports_thinking": true, "reasoning_effort": [{"value": "low"}, {"id": "medium"}, {"name": "high"}, {"label": "?"}]},
