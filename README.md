@@ -1,6 +1,9 @@
 # kagi-openai-proxy (Go)
 
-A personal, single-user, **localhost-only** proxy that exposes Kagi Assistant
+> [!WARNING]
+> **this works perfectly but this is pure vibeslop. you have been warned.**
+
+A personal, single-user, **localhost-first** proxy that exposes Kagi Assistant
 (`https://assistant.kagi.com`) as an OpenAI-compatible Chat Completions API. Point
 Raycast's Custom Providers (or any client with a configurable OpenAI `base_url`) at it
 and chat with the models in your paid Kagi plan.
@@ -55,6 +58,9 @@ status 499. That was an artefact of its ASGI server. In Go the handler watches
 (which starts the bounded drain) and returns **without writing a status**, because the
 connection is closed and any write would fail. Nothing reaches a client either way.
 
+A request still waiting for the turn slot gives up as soon as its client disconnects, so
+it never starts a Kagi turn nobody will read. (The Python version would still run it.)
+
 ## Build
 
 Requires Go ≥ 1.27. Standard library only; there are no module dependencies.
@@ -101,7 +107,7 @@ The result is one self-contained binary.
 
    SIGINT/SIGTERM shut it down gracefully. Open responses get 10s to finish. In-flight
    turns get 10s more to drain, then they are cancelled; each cancelled turn still
-   tries to delete its thread.
+   tries to delete its thread. To run it permanently, see [Deployment](#deployment).
 
 4. **Try it:**
 
@@ -112,11 +118,47 @@ The result is one self-contained binary.
           "messages": [{"role": "user", "content": "Hello"}]}'
    ```
 
-### Run at login with launchd (macOS)
+### Configuration
 
-Copy the binary to e.g. `~/bin/kagi-openai-proxy`, then create
-`~/Library/LaunchAgents/com.example.kagi-openai-proxy.plist`. The plist holds your
-session token, so make it readable only by you: `chmod 600` it.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `KAGI_SESSION_TOKEN` | *(required)* | Kagi session-link token, sent as the `kagi_session` cookie |
+| `PROXY_API_KEY` | *(required, ≥ 16 chars)* | Clients must send `Authorization: Bearer <PROXY_API_KEY>` |
+| `PROXY_HOST` | `127.0.0.1` | Bind address. Keep it loopback unless you deploy on a tailnet (see [Deployment](#deployment)) |
+| `PROXY_PORT` | `8000` | Bind port |
+| `PROXY_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Comma-separated `Host` header values to accept (DNS-rebinding defence). Ports and whitespace are stripped before matching; matching is exact. Setting it **replaces** the default. Empty/unset = localhost only |
+| `KAGI_BASE_URL` | `https://assistant.kagi.com` | Kagi Assistant origin |
+| `KAGI_DELETE_THREADS` | `true` | Delete each Kagi thread after its turn ends |
+| `KAGI_PERSONALIZATION` | `false` | Pass Kagi's `personalization` flag |
+| `KAGI_SEARCH_DEFAULT` | `online` | Web search for model ids without a suffix (`online`/`offline`) |
+| `KAGI_MAX_CONCURRENCY` | `1` | Max concurrent Kagi turns |
+| `KAGI_QUEUE_WAIT_SECONDS` | `30` | How long a request waits for a free slot before 429 |
+| `KAGI_CONNECT_TIMEOUT` | `20` | Upstream connect timeout (seconds) |
+| `KAGI_READ_TIMEOUT` | `120` | Upstream time-to-headers and per-read timeout (seconds); there is no total timeout |
+| `KAGI_MODELS_TTL` | `21600` | Model catalog cache lifetime (seconds) |
+
+The binary also has a `-healthcheck` flag: instead of serving, it sends `GET /health`
+to `PROXY_HOST:PROXY_PORT` (a `0.0.0.0`/`::` bind is reached through loopback), using
+the first `PROXY_ALLOWED_HOSTS` entry as the `Host` header so the allow-list accepts it.
+It exits 0 if the answer is `200 {"status":"ok"}`, else 1. It never calls Kagi. It
+exists for container `HEALTHCHECK`s on images without curl.
+
+Logs go to stderr in the format `2026-10-15 07:02:56,423 INFO kagi_proxy: ...`. The Go
+binary writes no per-request access log; under the Python version, uvicorn wrote those.
+
+## Deployment
+
+Pick one. In every case the proxy is reachable only from places you choose: your own
+machine, or your private tailnet.
+
+### Bare binary
+
+Run the binary as yourself. It binds `127.0.0.1:8000` by default, so only local apps
+such as Raycast can reach it.
+
+**macOS, launchd (optional).** Copy the binary to e.g. `~/bin/kagi-openai-proxy`, then
+create `~/Library/LaunchAgents/com.example.kagi-openai-proxy.plist`. The plist holds
+your session token, so `chmod 600` it.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -142,26 +184,65 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.kagi-openai-
 launchctl kickstart -k gui/$(id -u)/com.example.kagi-openai-proxy   # restart after changes
 ```
 
-### Configuration
+**Linux, systemd user service (optional).** Put the variables in
+`~/.config/kagi-openai-proxy.env` (`chmod 600`) and create
+`~/.config/systemd/user/kagi-openai-proxy.service`:
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `KAGI_SESSION_TOKEN` | *(required)* | Kagi session-link token, sent as the `kagi_session` cookie |
-| `PROXY_API_KEY` | *(required, ≥ 16 chars)* | Clients must send `Authorization: Bearer <PROXY_API_KEY>` |
-| `PROXY_HOST` | `127.0.0.1` | Bind address. Keep it loopback |
-| `PROXY_PORT` | `8000` | Bind port |
-| `KAGI_BASE_URL` | `https://assistant.kagi.com` | Kagi Assistant origin |
-| `KAGI_DELETE_THREADS` | `true` | Delete each Kagi thread after its turn ends |
-| `KAGI_PERSONALIZATION` | `false` | Pass Kagi's `personalization` flag |
-| `KAGI_SEARCH_DEFAULT` | `online` | Web search for model ids without a suffix (`online`/`offline`) |
-| `KAGI_MAX_CONCURRENCY` | `1` | Max concurrent Kagi turns |
-| `KAGI_QUEUE_WAIT_SECONDS` | `30` | How long a request waits for a free slot before 429 |
-| `KAGI_CONNECT_TIMEOUT` | `20` | Upstream connect timeout (seconds) |
-| `KAGI_READ_TIMEOUT` | `120` | Upstream time-to-headers and per-read timeout (seconds); there is no total timeout |
-| `KAGI_MODELS_TTL` | `21600` | Model catalog cache lifetime (seconds) |
+```ini
+[Unit]
+Description=kagi-openai-proxy
 
-Logs go to stderr in the format `2026-10-15 07:02:56,423 INFO kagi_proxy: ...`. The Go
-binary writes no per-request access log; under the Python version, uvicorn wrote those.
+[Service]
+EnvironmentFile=%h/.config/kagi-openai-proxy.env
+ExecStart=%h/bin/kagi-openai-proxy
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload && systemctl --user enable --now kagi-openai-proxy
+```
+
+### Docker + Tailscale
+
+Use this to run the proxy on one machine, such as a home server, and reach it from your
+other devices over your tailnet. The image is `FROM scratch` (binary + CA bundle, about
+3.5 MB), runs as `65534:65534` (nobody), and has a `HEALTHCHECK` using `-healthcheck`.
+Inside the container it listens on `0.0.0.0:8000`. You limit exposure in two places.
+
+1. **Publish on the Tailscale IP only.** In
+   [docker-compose.yml](docker-compose.yml), replace `100.101.102.103` with your
+   machine's Tailscale IP (`tailscale ip -4`). Never publish with plain `-p 8000:8000`
+   or `"8000:8000"`: that binds `0.0.0.0` on the host, every interface including your
+   LAN.
+2. **Allow your tailnet name/IP as Host.** Create `.env` next to the compose file. It
+   is git- and docker-ignored, so keep it that way, and `chmod 600` it:
+
+   ```sh
+   KAGI_SESSION_TOKEN=your-session-link-token
+   PROXY_API_KEY=your-proxy-key-at-least-16-chars
+   PROXY_ALLOWED_HOSTS=100.101.102.103,yourhost.your-tailnet.ts.net
+   ```
+
+```sh
+docker compose up -d --build
+docker compose ps        # STATUS shows (healthy) once /health answers
+```
+
+From another device on the tailnet, use `http://100.101.102.103:8000/v1` (or your
+MagicDNS name) as the `base_url`, for example in Raycast's `providers.yaml`.
+
+> [!CAUTION]
+> **Never use Tailscale Funnel** (or Serve with Funnel, port forwarding, a public reverse
+> proxy, or a cloud tunnel) for this. Funnel publishes the service to the whole
+> internet, and this proxy is your logged-in Kagi session. Keep it on your private
+> tailnet only.
+
+Plain HTTP is fine here. Tailscale traffic between your devices is already encrypted
+end-to-end by WireGuard, so the bearer key never crosses a network in the clear. Don't
+reuse the same setup over a LAN without Tailscale.
 
 ## Raycast
 
@@ -184,7 +265,7 @@ All errors use the OpenAI shape `{"error": {"message", "type", "param", "code"}}
 | Situation | HTTP | `type` / `code` |
 | --- | --- | --- |
 | Missing or wrong proxy key | 401 | `invalid_request_error` / `invalid_api_key` |
-| Host header other than `127.0.0.1` / `localhost` | 400 | plain text `Invalid host header` |
+| Host header not in `PROXY_ALLOWED_HOSTS` (default `127.0.0.1` / `localhost`) | 400 | plain text `Invalid host header` |
 | Kagi 401/403, redirect, or HTML instead of JSON | 401 | `authentication_error` / `kagi_session_expired` |
 | Kagi 429 or a quota-like turn failure | 429 | `rate_limit_error` |
 | Proxy busy longer than `KAGI_QUEUE_WAIT_SECONDS` | 429 | `rate_limit_error` / `proxy_busy` |
@@ -216,11 +297,15 @@ it by hand when the proxy starts misbehaving. Never schedule or automate it:
 KAGI_SESSION_TOKEN=... go run ./cmd/probe [-model MODEL_ID]
 ```
 
+## License
+
+[MIT](LICENSE).
+
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `cmd/kagi-openai-proxy` | Server binary: config, HTTP server, graceful shutdown |
+| `cmd/kagi-openai-proxy` | Server binary: config, HTTP server, graceful shutdown, `-healthcheck` |
 | `cmd/probe` | Manual live probe |
 | `internal/kagi` | The only code that knows Kagi URLs, headers and JSON; produces internal events |
 | `internal/events` | Internal turn events |
@@ -241,9 +326,10 @@ KAGI_SESSION_TOKEN=... go run ./cmd/probe [-model MODEL_ID]
   returning silently wrong output. `cmd/probe` shows what changed.
 - **Keep usage human-scale.** One turn at a time by default and no automatic retries.
   Don't script bulk traffic through it, share it, or raise concurrency far.
-- **Never expose it beyond localhost.** The proxy is effectively your logged-in Kagi
-  session. It binds `127.0.0.1`, rejects other `Host` headers, requires a bearer key,
-  and sends no CORS headers. Do not put it behind a tunnel, a reverse proxy, or
-  `0.0.0.0`.
+- **Never expose it to the internet.** The proxy is effectively your logged-in Kagi
+  session. By default it binds `127.0.0.1`, rejects other `Host` headers, requires a
+  bearer key, and sends no CORS headers. The only remote setup this README supports is
+  a private tailnet ([Deployment](#deployment)). No Tailscale Funnel, public reverse
+  proxy, port forward, or `0.0.0.0` publish on a LAN.
 - **Secrets:** the session token and proxy key are redacted from logs, error messages,
   and probe output. Logs record token counts and `cost_usd` per turn, never the prompt.

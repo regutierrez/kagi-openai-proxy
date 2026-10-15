@@ -9,6 +9,11 @@
 > delta is whitespace-stripped, every error body/chunk is redacted. Approved Go deviation:
 > a non-streaming client that has disconnected gets no status (the Python 499 was an ASGI
 > artefact); see README.
+>
+> **Go-only additions after the port** (documented in README): `PROXY_ALLOWED_HOSTS`
+> (comma-separated Host allow-list, ports stripped; empty/unset = the localhost-only list
+> below), a request queued for the turn slot abandons the wait when its client
+> disconnects (never spends a Kagi turn), a `-healthcheck` flag, and a Docker image.
 
 Implement exactly this spec. It has already been through an architecture review; deviations are allowed only where the spec is internally impossible — otherwise implement as written and record concerns in your final report.
 
