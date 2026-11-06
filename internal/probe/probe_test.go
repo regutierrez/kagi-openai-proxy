@@ -80,9 +80,16 @@ func TestFrameWithoutPayloadReportsDriftNotCrash(t *testing.T) {
 func TestRealisticStreamPasses(t *testing.T) {
 	fake := kagitest.New()
 	defer fake.Close()
+	for range 2 { // new thread, then follow-up
+		fake.AddScript(kagitest.Script{Steps: []kagitest.Step{kagitest.RealisticStream}})
+	}
+	// The long answer stalls after its first delta until the probe cancels it.
+	fake.AddScript(kagitest.Script{Steps: []kagitest.Step{kagitest.SSE(kagitest.Partial()...), kagitest.NewGate()}})
 	status, out := run(t, fake)
-	if status != 0 || !strings.Contains(out, "OK: event sequence") || !fake.Has(kagitest.Delete) {
-		t.Fatalf("status=%d\n%s", status, out)
+	calls := strings.Join(fake.Calls(), " | ")
+	if status != 0 || !strings.Contains(out, "OK: new thread, follow-up and cancel") || fake.Count(kagitest.Respond) != 2 ||
+		!strings.Contains(calls, kagitest.Cancel+" | stream:cancelled") || !fake.Has(kagitest.Delete) {
+		t.Fatalf("status=%d calls=%s\n%s", status, calls, out)
 	}
 }
 

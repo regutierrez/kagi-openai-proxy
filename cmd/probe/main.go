@@ -1,13 +1,16 @@
 // Command probe is a MANUAL live probe of the Kagi Assistant wire protocol. Never run it
 // automatically or on a schedule.
 //
-// It spends one real (cheap) Kagi Assistant turn:
+// It spends three real (cheap) Kagi Assistant turns in one thread:
 //  1. GET /api/init and pick the cheapest-looking model (or -model).
-//  2. POST /api/v2/conversations with "Reply with exactly: PONG" (web search off).
-//  3. Stream the turn and check the event sequence
+//  2. POST /api/v2/conversations with "Reply with exactly: PONG" (web search off) and
+//     check the event sequence
 //     turn.started -> node.created(text) -> node.delta+ -> turn.completed -> is_final
-//     (other events such as thinking nodes or references may appear in between).
-//  4. DELETE the thread, always.
+//     (other events such as activity nodes or references may appear in between).
+//  3. The same as a follow-up: POST /api/v2/branches/{uuid}/respond.
+//  4. A long follow-up, cancelled at its first delta: POST /api/v2/turns/{uuid}/cancel
+//     must end the stream with turn.cancelled and is_final.
+//  5. DELETE the thread, always.
 //
 // Usage:
 //

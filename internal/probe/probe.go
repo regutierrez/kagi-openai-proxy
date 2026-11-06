@@ -1,6 +1,6 @@
 // Package probe is the MANUAL live check of the Kagi Assistant wire protocol (see
-// cmd/probe). It spends one cheap turn, reports the event sequence the proxy relies on,
-// and always deletes the thread. Never run it automatically.
+// cmd/probe). It spends three cheap turns, reports the event sequences the proxy relies
+// on, and always deletes the thread. Never run it automatically.
 package probe
 
 import (
@@ -10,8 +10,8 @@ import (
 	"io"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
+	"time"
 
 	"kagiopenaiproxy/internal/events"
 	"kagiopenaiproxy/internal/kagi"
@@ -157,7 +157,53 @@ func CheckSequence(frames []map[string]any) []string {
 	return problems
 }
 
-// Run spends one turn, prints the event sequence to out, and always deletes the thread.
+// CancelPrompt asks for a long answer, so the probe can cancel it mid-stream.
+const CancelPrompt = "Count from 1 to 400, one number per line."
+
+// turn is one read turn stream.
+type turn struct {
+	raw    []string
+	frames []map[string]any
+}
+
+// readTurn reads a turn stream to its end. onFrame (may be nil) sees each frame.
+func readTurn(ctx context.Context, client *kagi.Client, turnUUID string, onFrame func(map[string]any), say func(string, ...any)) (turn, error) {
+	stream, err := client.OpenTurnStream(ctx, turnUUID)
+	if err != nil {
+		return turn{}, err
+	}
+	defer stream.Close()
+	var t turn
+	for {
+		data, err := stream.NextFrame()
+		if errors.Is(err, io.EOF) {
+			return t, nil
+		}
+		if err != nil {
+			return t, err
+		}
+		t.raw = append(t.raw, data)
+		obj, jerr := kagi.DecodeJSON([]byte(data))
+		if jerr != nil {
+			// Redact first, then truncate, so a secret on the boundary leaves no prefix.
+			say("  ! unparseable frame: %q", redact.Bounded(data, 120))
+			continue
+		}
+		if m, ok := obj.(map[string]any); ok {
+			t.frames = append(t.frames, m)
+			if onFrame != nil {
+				onFrame(m)
+			}
+		}
+	}
+}
+
+// Run spends three cheap turns in one thread and always deletes the thread:
+//  1. a new thread: the event sequence the proxy relies on;
+//  2. a follow-up (POST /api/v2/branches/{uuid}/respond): the same sequence;
+//  3. a long follow-up cancelled mid-answer (POST /api/v2/turns/{uuid}/cancel): the
+//     stream must end with turn.cancelled and is_final.
+//
 // It returns the process exit status: 0 = protocol as expected, 1 = drift or error.
 // Every line printed is redacted.
 func Run(ctx context.Context, client *kagi.Client, model string, out io.Writer) (status int) {
@@ -181,6 +227,13 @@ func Run(ctx context.Context, client *kagi.Client, model string, out io.Writer) 
 			say("Kagi error (%s): %s", kerr.Kind, kerr.Message)
 		} else {
 			say("error: %v", err)
+		}
+		return 1
+	}
+	drift := func(problems []string) int {
+		say("PROTOCOL DRIFT:")
+		for _, p := range problems {
+			say("  - %s", p)
 		}
 		return 1
 	}
@@ -208,72 +261,90 @@ func Run(ctx context.Context, client *kagi.Client, model string, out io.Writer) 
 		return kagiError(err)
 	}
 	conversationUUID = created.ConversationUUID
-	say("conversation=%s turn=%s", conversationUUID, created.AssistantTurnUUID)
+	say("conversation=%s branch=%s turn=%s", conversationUUID, created.BranchUUID, created.AssistantTurnUUID)
 
-	stream, err := client.OpenTurnStream(ctx, created.AssistantTurnUUID)
+	// checkTurn reads a completed turn and reports its sequence problems.
+	checkTurn := func(label, turnUUID string) ([]string, error) {
+		t, err := readTurn(ctx, client, turnUUID, nil, say)
+		if err != nil {
+			return nil, err
+		}
+		var evs []events.Event
+		for _, data := range t.raw {
+			evs = append(evs, kagi.ParseFrame(data)...)
+		}
+		say("%s:", label)
+		for _, f := range t.frames {
+			line := "is_final"
+			if _, isTitle := f["title"].(string); isTitle && eventOf(f) == nil {
+				line = "title"
+			} else if !kagi.Truthy(f["is_final"]) {
+				line = str(eventOf(f)["type"])
+				if kind := payloadOf(f)["kind"]; kagi.Truthy(kind) {
+					line += "(" + str(kind) + ")"
+				}
+			}
+			say("  %s", line)
+		}
+		answer := AnswerText(evs)
+		say("  answer: %q", answer)
+		if strings.TrimSpace(answer) != "PONG" {
+			say("  note: answer is not exactly 'PONG' (model behaviour, not necessarily protocol drift)")
+		}
+		return append(MalformedFrames(evs), CheckSequence(t.frames)...), nil
+	}
+
+	problems, err := checkTurn("new thread", created.AssistantTurnUUID)
 	if err != nil {
 		return kagiError(err)
 	}
-	var raw []string
-	var frames []map[string]any
-	for {
-		data, err := stream.NextFrame()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			stream.Close()
-			return kagiError(err)
-		}
-		raw = append(raw, data)
-		obj, jerr := kagi.DecodeJSON([]byte(data))
-		if jerr != nil {
-			// Redact first, then truncate, so a secret on the boundary leaves no prefix.
-			say("  ! unparseable frame: %s", strconv.Quote(redact.Bounded(data, 120)))
-			continue
-		}
-		if m, ok := obj.(map[string]any); ok {
-			frames = append(frames, m)
-		}
-	}
-	stream.Close()
-
-	var evs []events.Event
-	for _, data := range raw {
-		evs = append(evs, kagi.ParseFrame(data)...)
-	}
-	answer := AnswerText(evs)
-	for _, f := range frames {
-		line := "is_final"
-		if !kagi.Truthy(f["is_final"]) {
-			line = str(eventOf(f)["type"])
-			if kind := payloadOf(f)["kind"]; kagi.Truthy(kind) {
-				line += "(" + str(kind) + ")"
-			}
-		}
-		say("  %s", line)
-	}
-	var usage any
-	for _, f := range frames {
-		if eventOf(f)["type"] == "turn.completed" {
-			usage = payloadOf(f)["usage"]
-			break
-		}
-	}
-	say("answer: %s", strconv.Quote(answer))
-	say("usage: %v", usage)
-	if strings.TrimSpace(answer) != "PONG" {
-		say("note: answer is not exactly 'PONG' (model behaviour, not necessarily protocol drift)")
-	}
-
-	problems := append(MalformedFrames(evs), CheckSequence(frames)...)
 	if len(problems) > 0 {
-		say("PROTOCOL DRIFT:")
-		for _, p := range problems {
-			say("  - %s", p)
-		}
-		return 1
+		return drift(problems)
 	}
-	say("OK: event sequence matches the proxy's expectations")
+	if created.BranchUUID == "" {
+		return drift([]string{"create-conversation response has no branch_uuid: follow-ups cannot work"})
+	}
+
+	followUp, err := client.Respond(ctx, created.BranchUUID, Prompt, model, kagi.TurnOptions{})
+	if err != nil {
+		return kagiError(err)
+	}
+	if problems, err = checkTurn("follow-up", followUp.AssistantTurnUUID); err != nil {
+		return kagiError(err)
+	}
+	if len(problems) > 0 {
+		return drift(problems)
+	}
+
+	long, err := client.Respond(ctx, created.BranchUUID, CancelPrompt, model, kagi.TurnOptions{})
+	if err != nil {
+		return kagiError(err)
+	}
+	var cancelledAt time.Time
+	var cancelErr error
+	t, err := readTurn(ctx, client, long.AssistantTurnUUID, func(f map[string]any) {
+		if cancelledAt.IsZero() && eventOf(f)["type"] == "node.delta" {
+			cancelledAt = time.Now()
+			cancelErr = client.CancelTurn(ctx, long.AssistantTurnUUID)
+		}
+	}, say)
+	if err != nil {
+		return kagiError(err)
+	}
+	if cancelErr != nil {
+		return kagiError(cancelErr)
+	}
+	sawCancelled := false
+	for _, f := range t.frames {
+		sawCancelled = sawCancelled || eventOf(f)["type"] == "turn.cancelled"
+	}
+	switch {
+	case cancelledAt.IsZero():
+		return drift([]string{"cancel check: the long answer produced no node.delta"})
+	case !sawCancelled || !kagi.Truthy(t.frames[len(t.frames)-1]["is_final"]):
+		return drift([]string{"cancel check: stream did not end with turn.cancelled then is_final"})
+	}
+	say("cancel: stream ended %s after POST .../cancel", time.Since(cancelledAt).Round(time.Millisecond))
+	say("OK: new thread, follow-up and cancel match the proxy's expectations")
 	return 0
 }
