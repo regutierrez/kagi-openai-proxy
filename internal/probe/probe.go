@@ -10,12 +10,12 @@ import (
 	"io"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"kagiopenaiproxy/internal/events"
 	"kagiopenaiproxy/internal/kagi"
 	"kagiopenaiproxy/internal/redact"
-	"kagiopenaiproxy/internal/textutil"
 )
 
 // Prompt is the probe's fixed question.
@@ -57,12 +57,12 @@ func payloadOf(frame map[string]any) map[string]any {
 	return p
 }
 
-// pyStr is Python's str() for a JSON value.
-func pyStr(v any) string {
+// str renders a JSON value for the probe's output.
+func str(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	return textutil.Repr(v)
+	return fmt.Sprint(v)
 }
 
 // AnswerText rebuilds the answer from the proxy's validated events only (malformed
@@ -113,9 +113,9 @@ func CheckSequence(frames []map[string]any) []string {
 			continue
 		}
 		event := eventOf(frame)
-		labels = append(labels, label{pyStr(event["type"]), event["node_id"], payloadOf(frame)["kind"]})
+		labels = append(labels, label{str(event["type"]), event["node_id"], payloadOf(frame)["kind"]})
 		if kagi.Truthy(frame["error"]) {
-			problems = append(problems, "frame-level error: "+textutil.Repr(frame["error"]))
+			problems = append(problems, "frame-level error: "+str(frame["error"]))
 		}
 	}
 	first := func(pred func(label) bool, start int) int {
@@ -196,11 +196,7 @@ func Run(ctx context.Context, client *kagi.Client, model string, out io.Writer) 
 		say("probe: catalog has no usable models")
 		return 1
 	}
-	defaultID := catalog.DefaultID
-	if defaultID == "" {
-		defaultID = "None"
-	}
-	say("catalog: %d usable models, default=%s; probing with %s", len(catalog.Models), defaultID, model)
+	say("catalog: %d usable models, default=%q; probing with %s", len(catalog.Models), catalog.DefaultID, model)
 
 	created, err := client.CreateTurn(ctx, Prompt, model, kagi.TurnOptions{}) // search off, Kagi's default effort
 	if err != nil {
@@ -233,7 +229,7 @@ func Run(ctx context.Context, client *kagi.Client, model string, out io.Writer) 
 		obj, jerr := kagi.DecodeJSON([]byte(data))
 		if jerr != nil {
 			// Redact first, then truncate, so a secret on the boundary leaves no prefix.
-			say("  ! unparseable frame: %s", textutil.Repr(redact.Bounded(data, 120)))
+			say("  ! unparseable frame: %s", strconv.Quote(redact.Bounded(data, 120)))
 			continue
 		}
 		if m, ok := obj.(map[string]any); ok {
@@ -250,9 +246,9 @@ func Run(ctx context.Context, client *kagi.Client, model string, out io.Writer) 
 	for _, f := range frames {
 		line := "is_final"
 		if !kagi.Truthy(f["is_final"]) {
-			line = pyStr(eventOf(f)["type"])
+			line = str(eventOf(f)["type"])
 			if kind := payloadOf(f)["kind"]; kagi.Truthy(kind) {
-				line += "(" + pyStr(kind) + ")"
+				line += "(" + str(kind) + ")"
 			}
 		}
 		say("  %s", line)
@@ -264,9 +260,9 @@ func Run(ctx context.Context, client *kagi.Client, model string, out io.Writer) 
 			break
 		}
 	}
-	say("answer: %s", textutil.Repr(answer))
-	say("usage: %s", textutil.Repr(usage))
-	if textutil.Strip(answer) != "PONG" {
+	say("answer: %s", strconv.Quote(answer))
+	say("usage: %v", usage)
+	if strings.TrimSpace(answer) != "PONG" {
 		say("note: answer is not exactly 'PONG' (model behaviour, not necessarily protocol drift)")
 	}
 

@@ -108,6 +108,9 @@ func TestParseFrameEventTypes(t *testing.T) {
 	if f := ParseFrame(eventFrame("turn.cancelled", nil, map[string]any{"error_code": "quota_exceeded"}))[0].(events.TurnFailed); !f.RateLimited {
 		t.Fatal("quota_exceeded should be rate limited")
 	}
+	// Live shape of a user cancel: no error_code.
+	eqEvents(t, ParseFrame(eventFrame("turn.cancelled", nil, map[string]any{"reason": "cancelled"})),
+		events.TurnFailed{Code: "kagi_turn_cancelled", Message: "Kagi turn.cancelled (kagi_turn_cancelled)"})
 	eqEvents(t, ParseFrame(eventFrame("something.new", nil, map[string]any{})), events.Unknown{Type: "something.new"})
 	// integer node ids become strings; floats do not
 	eqEvents(t, ParseFrame(`{"event": {"type": "node.delta", "node_id": 7, "payload": {"delta": "x"}}}`), events.TextDelta{NodeID: "7", Text: "x"})
@@ -132,7 +135,6 @@ func TestMalformedFramesAreProtocolDrift(t *testing.T) {
 		`{"event": {"type": "reference.added", "payload": {"url": "u"}}}`,              // no ref_id
 		`{"event": null}`, // present but null (absent key is a title-only frame)
 		`{"event": {"type": "turn.failed", "payload": {}}}`, // no error_code
-		`{"event": {"type": "turn.cancelled"}}`,             // no payload at all
 		`{"a": 1} trailing`,                                 // trailing data
 	} {
 		t.Run(data, func(t *testing.T) {
@@ -157,7 +159,7 @@ func TestUnknownEventTypesLoggedOnce(t *testing.T) {
 	if n := strings.Count(logs.String(), "unknown event type"); n != 1 {
 		t.Fatalf("logged %d times:\n%s", n, logs)
 	}
-	if !strings.Contains(logs.String(), "Kagi stream: ignoring unknown event type 'brand.new' (logged once)") {
+	if !strings.Contains(logs.String(), "Kagi stream: ignoring unknown event type \"brand.new\" (logged once)") {
 		t.Fatalf("log line: %s", logs)
 	}
 }
@@ -184,7 +186,7 @@ func TestCatalogFilterAndDefault(t *testing.T) {
 		{"id": "d", "supported": false},
 		{"id": "e", "supported": 1},
 		{"id": "f", "supported": true, "context_window": 1.5}
-	]}, "default_model": {"id": "f"}}`))
+	 ], "default": "f"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,12 +200,6 @@ func TestCatalogFilterAndDefault(t *testing.T) {
 	}
 	if _, err := ParseCatalog(map[string]any{}); err == nil {
 		t.Fatal("missing models.models must be protocol drift")
-	}
-}
-
-func TestQuote(t *testing.T) {
-	if got := quote("a b/c~_.-ü"); got != "a%20b%2Fc~_.-%C3%BC" {
-		t.Fatalf("quote = %q", got)
 	}
 }
 
@@ -243,37 +239,5 @@ func TestCatalogReasoningEffortLiveShape(t *testing.T) {
 		if !reflect.DeepEqual(m.ReasoningEfforts, want.options) || m.ReasoningEffortDefault != want.def {
 			t.Fatalf("%s: options %#v default %q, want %#v %q", id, m.ReasoningEfforts, m.ReasoningEffortDefault, want.options, want.def)
 		}
-	}
-}
-
-// Older shape guesses, kept as fallbacks when parameters.reasoning_effort is absent.
-func TestCatalogReasoningEffortFallbackShapes(t *testing.T) {
-	obj, err := DecodeJSON([]byte(`{"models": {"models": [
-		{"id": "glm", "supported": true, "supports_thinking": true, "reasoning_effort": ["low", "high", "max"]},
-		{"id": "opus", "supported": true, "supports_thinking": true, "reasoning_effort": [{"value": "low"}, {"id": "medium"}, {"name": "high"}, {"label": "?"}]},
-		{"id": "wrapped", "supported": true, "reasoning_effort": {"options": ["low", "low", "max"], "default": "max"}},
-		{"id": "quick", "supported": true, "supports_thinking": false, "reasoning_effort": ["none"]},
-		{"id": "plain", "supported": true},
-		{"id": "odd", "supported": true, "reasoning_effort": "max"}
-	]}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog, err := ParseCatalog(obj)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string][]string{"glm": {"low", "high", "max"}, "opus": {"low", "medium", "high"}, "wrapped": {"low", "max"}, "quick": {"none"}, "plain": nil, "odd": nil}
-	for id, efforts := range want {
-		m, _ := catalog.Get(id)
-		if !reflect.DeepEqual(m.ReasoningEfforts, efforts) {
-			t.Fatalf("%s efforts = %#v, want %#v", id, m.ReasoningEfforts, efforts)
-		}
-	}
-	if m, _ := catalog.Get("glm"); !m.SupportsThinking {
-		t.Fatal("supports_thinking not read")
-	}
-	if m, _ := catalog.Get("quick"); m.SupportsThinking {
-		t.Fatal("supports_thinking false read as true")
 	}
 }

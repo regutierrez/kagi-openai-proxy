@@ -28,8 +28,8 @@ The authoritative behaviour spec is [SPEC.md](SPEC.md).
 
 Every request is turned into **one new Kagi thread**: the whole OpenAI message list is
 flattened into a single prompt (system instructions + transcript), sent, streamed back,
-and then, by default, the thread is deleted, i.e. moved to Kagi's trash (see
-[Kagi threads](#kagi-threads) for the `temporary` and `keep` modes). There is no
+and then, by default, left as a Kagi *Temporary* thread that expires on its own (see
+[Kagi threads](#kagi-threads) for the `delete` and `keep` modes). There is no
 conversation cache in v0.1, so long chats resend their history each turn. When the
 flattened prompt exceeds ~70% of the model's context window, the oldest messages are
 dropped and replaced by `[...earlier messages omitted...]`.
@@ -111,8 +111,8 @@ it. The wire facts below were verified against live Kagi:
 
 | Mode | Creation `POST /api/v2/conversations` | After the turn | In Kagi's UI |
 | --- | --- | --- | --- |
-| `delete` (default) | no `is_saved` | `DELETE /api/conversations/{uuid}` | moved to the **trash**, see below |
-| `temporary` | `"is_saved": false` | nothing | in the sidebar with a *Temporary* badge; Kagi expires it after your account's temporary window |
+| `delete` | no `is_saved` | `DELETE /api/conversations/{uuid}` | moved to the **trash**, see below |
+| `temporary` (default) | `"is_saved": false` | nothing | in the sidebar with a *Temporary* badge; Kagi expires it after your account's temporary window |
 | `keep` | no `is_saved` | nothing | whatever your account's `thread_saving_mode` says |
 
 - **`delete` is a soft delete.** Kagi's `DELETE /api/conversations/{uuid}` puts the
@@ -209,8 +209,7 @@ The result is one self-contained binary.
 | `PROXY_PORT` | `8000` | Bind port |
 | `PROXY_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Comma-separated `Host` header values to accept (DNS-rebinding defence). Ports and whitespace are stripped before matching; matching is exact. Setting it **replaces** the default. Empty/unset = localhost only |
 | `KAGI_BASE_URL` | `https://assistant.kagi.com` | Kagi Assistant origin |
-| `KAGI_THREAD_LIFECYCLE` | `delete` | What happens to each Kagi thread: `delete` (DELETE after the turn, which moves it to Kagi's trash), `temporary` (created with `is_saved: false`, never deleted, auto-expires per your account), or `keep` (account default, never deleted). See [Kagi threads](#kagi-threads) |
-| `KAGI_DELETE_THREADS` | *(deprecated)* | Old alias: `true` = `delete`, `false` = `keep`. Logged as deprecated when used alone. If it is set together with `KAGI_THREAD_LIFECYCLE` and they disagree, startup fails |
+| `KAGI_THREAD_LIFECYCLE` | `temporary` | What happens to each Kagi thread: `temporary` (created with `is_saved: false`, never deleted, auto-expires per your account), `delete` (DELETE after the turn, which moves it to Kagi's trash), or `keep` (account default, never deleted). See [Kagi threads](#kagi-threads) |
 | `KAGI_PERSONALIZATION` | `false` | Pass Kagi's `personalization` flag |
 | `KAGI_SEARCH_DEFAULT` | `online` | Web search for model ids without a suffix (`online`/`offline`) |
 | `KAGI_REASONING_EFFORT` | *(unset)* | Default `reasoning_effort` when neither the request nor a model suffix sets one: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Validated at startup. Unset = Kagi's per-model default. Skipped (logged once) for a model whose catalog options don't include it |

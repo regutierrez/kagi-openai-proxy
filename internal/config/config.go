@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"kagiopenaiproxy/internal/kagi"
-	"kagiopenaiproxy/internal/textutil"
 )
 
 // MinProxyKeyLength rejects weak keys; redaction would also mangle ordinary words
@@ -37,8 +37,6 @@ type Settings struct {
 	ConnectTimeout  time.Duration
 	ReadTimeout     time.Duration
 	ModelsTTL       time.Duration
-	// Warnings are startup notices (e.g. deprecated variables) for main to log once.
-	Warnings []string
 	// Internal tuning knobs; not part of the documented env surface.
 	Keepalive    time.Duration
 	DrainTimeout time.Duration
@@ -58,7 +56,7 @@ func Defaults(token, key string) Settings {
 		AllowedHosts:        DefaultAllowedHosts(),
 		Port:                8000,
 		KagiBaseURL:         "https://assistant.kagi.com",
-		ThreadLifecycle:     LifecycleDelete,
+		ThreadLifecycle:     LifecycleTemporary,
 		Personalization:     false,
 		SearchDefaultOnline: true,
 		MaxConcurrency:      1,
@@ -98,42 +96,17 @@ func (l ThreadLifecycle) IsSaved() *bool {
 	return nil
 }
 
-// threadLifecycle reads KAGI_THREAD_LIFECYCLE and its deprecated alias
-// KAGI_DELETE_THREADS (true -> delete, false -> keep). Both set and disagreeing is an
-// error; the alias alone yields a deprecation warning.
-func threadLifecycle(get Lookup) (ThreadLifecycle, []string, error) {
-	var lifecycle ThreadLifecycle
-	if raw, ok := get("KAGI_THREAD_LIFECYCLE"); ok && textutil.Strip(raw) != "" {
-		lifecycle = ThreadLifecycle(strings.ToLower(textutil.Strip(raw)))
-		switch lifecycle {
-		case LifecycleDelete, LifecycleTemporary, LifecycleKeep:
-		default:
-			return "", nil, errorf("KAGI_THREAD_LIFECYCLE must be delete, temporary or keep, got %s", textutil.Repr(raw))
-		}
+// threadLifecycle reads KAGI_THREAD_LIFECYCLE (default temporary).
+func threadLifecycle(get Lookup) (ThreadLifecycle, error) {
+	raw, _ := get("KAGI_THREAD_LIFECYCLE")
+	lifecycle := ThreadLifecycle(strings.ToLower(strings.TrimSpace(raw)))
+	switch lifecycle {
+	case "":
+		return LifecycleTemporary, nil
+	case LifecycleDelete, LifecycleTemporary, LifecycleKeep:
+		return lifecycle, nil
 	}
-	raw, aliasSet := get("KAGI_DELETE_THREADS")
-	if !aliasSet || textutil.Strip(raw) == "" {
-		if lifecycle == "" {
-			lifecycle = LifecycleDelete
-		}
-		return lifecycle, nil, nil
-	}
-	deletes, err := boolean(get, "KAGI_DELETE_THREADS", true)
-	if err != nil {
-		return "", nil, err
-	}
-	alias := LifecycleKeep
-	if deletes {
-		alias = LifecycleDelete
-	}
-	if lifecycle == "" {
-		return alias, []string{fmt.Sprintf("KAGI_DELETE_THREADS is deprecated; use KAGI_THREAD_LIFECYCLE=%s instead", alias)}, nil
-	}
-	if lifecycle != alias {
-		return "", nil, errorf("KAGI_THREAD_LIFECYCLE=%s conflicts with the deprecated KAGI_DELETE_THREADS=%s (which means %s); unset KAGI_DELETE_THREADS",
-			lifecycle, textutil.Strip(raw), alias)
-	}
-	return lifecycle, nil, nil
+	return "", errorf("KAGI_THREAD_LIFECYCLE must be temporary, delete or keep, got %s", strconv.Quote(raw))
 }
 
 // DefaultAllowedHosts is the localhost-only Host allow-list.
@@ -157,13 +130,13 @@ func HostOnly(hostHeader string) (host string, ok bool) {
 func parseAllowedHosts(raw string) ([]string, error) {
 	var hosts []string
 	for _, entry := range strings.Split(raw, ",") {
-		entry = textutil.Strip(entry)
+		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
 		}
 		host, ok := HostOnly(entry)
 		if !ok {
-			return nil, errorf("PROXY_ALLOWED_HOSTS entry %s is not a host name or address", textutil.Repr(entry))
+			return nil, errorf("PROXY_ALLOWED_HOSTS entry %s is not a host name or address", strconv.Quote(entry))
 		}
 		hosts = append(hosts, host)
 	}
@@ -187,7 +160,7 @@ type Lookup func(name string) (value string, ok bool)
 func FromEnv(get Lookup) (Settings, error) {
 	token, _ := get("KAGI_SESSION_TOKEN")
 	key, _ := get("PROXY_API_KEY")
-	token, key = textutil.Strip(token), textutil.Strip(key)
+	token, key = strings.TrimSpace(token), strings.TrimSpace(key)
 	var missing []string
 	if token == "" {
 		missing = append(missing, "KAGI_SESSION_TOKEN")
@@ -198,29 +171,29 @@ func FromEnv(get Lookup) (Settings, error) {
 	if len(missing) > 0 {
 		return Settings{}, errorf("required environment variable(s) not set: %s", strings.Join(missing, ", "))
 	}
-	if textutil.Len(key) < MinProxyKeyLength {
+	if utf8.RuneCountInString(key) < MinProxyKeyLength {
 		return Settings{}, errorf("PROXY_API_KEY must be at least %d characters long", MinProxyKeyLength)
 	}
 	search := "online"
 	if raw, ok := get("KAGI_SEARCH_DEFAULT"); ok {
-		if v := strings.ToLower(textutil.Strip(raw)); v != "" {
+		if v := strings.ToLower(strings.TrimSpace(raw)); v != "" {
 			search = v
 		}
 	}
 	if search != "online" && search != "offline" {
-		return Settings{}, errorf("KAGI_SEARCH_DEFAULT must be 'online' or 'offline', got %s", textutil.Repr(search))
+		return Settings{}, errorf("KAGI_SEARCH_DEFAULT must be 'online' or 'offline', got %s", strconv.Quote(search))
 	}
 
 	s := Defaults(token, key)
 	s.SearchDefaultOnline = search == "online"
-	if raw, ok := get("PROXY_HOST"); ok && textutil.Strip(raw) != "" {
-		s.Host = textutil.Strip(raw)
+	if raw, ok := get("PROXY_HOST"); ok && strings.TrimSpace(raw) != "" {
+		s.Host = strings.TrimSpace(raw)
 	}
 	if raw, ok := get("KAGI_REASONING_EFFORT"); ok {
-		effort := strings.ToLower(textutil.Strip(raw))
+		effort := strings.ToLower(strings.TrimSpace(raw))
 		if effort != "" && !kagi.IsReasoningEffort(effort) {
 			return Settings{}, errorf("KAGI_REASONING_EFFORT must be one of %s (or empty), got %s",
-				strings.Join(kagi.ReasoningEfforts, ", "), textutil.Repr(raw))
+				strings.Join(kagi.ReasoningEfforts, ", "), strconv.Quote(raw))
 		}
 		s.ReasoningEffort = effort
 	}
@@ -231,8 +204,8 @@ func FromEnv(get Lookup) (Settings, error) {
 		}
 		s.AllowedHosts = hosts
 	}
-	if raw, ok := get("KAGI_BASE_URL"); ok && textutil.Strip(raw) != "" {
-		s.KagiBaseURL = textutil.Strip(raw)
+	if raw, ok := get("KAGI_BASE_URL"); ok && strings.TrimSpace(raw) != "" {
+		s.KagiBaseURL = strings.TrimSpace(raw)
 	}
 	s.KagiBaseURL = strings.TrimRight(s.KagiBaseURL, "/")
 
@@ -240,7 +213,7 @@ func FromEnv(get Lookup) (Settings, error) {
 	if s.Port, err = integer(get, "PROXY_PORT", s.Port, 1); err != nil {
 		return Settings{}, err
 	}
-	if s.ThreadLifecycle, s.Warnings, err = threadLifecycle(get); err != nil {
+	if s.ThreadLifecycle, err = threadLifecycle(get); err != nil {
 		return Settings{}, err
 	}
 	if s.Personalization, err = boolean(get, "KAGI_PERSONALIZATION", s.Personalization); err != nil {
@@ -267,44 +240,44 @@ func FromEnv(get Lookup) (Settings, error) {
 
 func boolean(get Lookup, name string, def bool) (bool, error) {
 	raw, ok := get(name)
-	if !ok || textutil.Strip(raw) == "" {
+	if !ok || strings.TrimSpace(raw) == "" {
 		return def, nil
 	}
-	switch strings.ToLower(textutil.Strip(raw)) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "1", "true", "yes", "on":
 		return true, nil
 	case "0", "false", "no", "off":
 		return false, nil
 	}
-	return false, errorf("%s must be true/false, got %s", name, textutil.Repr(raw))
+	return false, errorf("%s must be true/false, got %s", name, strconv.Quote(raw))
 }
 
 func integer(get Lookup, name string, def, minimum int) (int, error) {
 	raw, ok := get(name)
-	if !ok || textutil.Strip(raw) == "" {
+	if !ok || strings.TrimSpace(raw) == "" {
 		return def, nil
 	}
-	v, err := strconv.Atoi(textutil.Strip(raw))
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil {
-		return 0, errorf("%s must be an integer, got %s", name, textutil.Repr(raw))
+		return 0, errorf("%s must be an integer, got %s", name, strconv.Quote(raw))
 	}
 	if v < minimum {
-		return 0, errorf("%s must be >= %d, got %s", name, minimum, textutil.Repr(raw))
+		return 0, errorf("%s must be >= %d, got %s", name, minimum, strconv.Quote(raw))
 	}
 	return v, nil
 }
 
 func seconds(get Lookup, name string, def time.Duration) (time.Duration, error) {
 	raw, ok := get(name)
-	if !ok || textutil.Strip(raw) == "" {
+	if !ok || strings.TrimSpace(raw) == "" {
 		return def, nil
 	}
-	v, err := strconv.ParseFloat(textutil.Strip(raw), 64)
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 	if err != nil {
-		return 0, errorf("%s must be a number, got %s", name, textutil.Repr(raw))
+		return 0, errorf("%s must be a number, got %s", name, strconv.Quote(raw))
 	}
 	if v < 0 {
-		return 0, errorf("%s must be >= 0, got %s", name, textutil.Repr(raw))
+		return 0, errorf("%s must be >= 0, got %s", name, strconv.Quote(raw))
 	}
 	return time.Duration(v * float64(time.Second)), nil
 }

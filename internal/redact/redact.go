@@ -7,8 +7,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-
-	"kagiopenaiproxy/internal/textutil"
 )
 
 // Marker replaces every removed secret.
@@ -58,5 +56,17 @@ func String(s string) string {
 // Bounded redacts first, then truncates to limit characters: truncating first could cut
 // a secret in half and leak its prefix.
 func Bounded(s string, limit int) string {
-	return textutil.TruncateRunes(String(s), limit)
+	return truncateRunes(String(s), limit)
+}
+
+// truncateRunes keeps the first limit characters (code points) of s.
+func truncateRunes(s string, limit int) string {
+	n := 0
+	for i := range s {
+		if n == limit {
+			return s[:i]
+		}
+		n++
+	}
+	return s
 }

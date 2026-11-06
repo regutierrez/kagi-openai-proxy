@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,7 +12,6 @@ import (
 	"kagiopenaiproxy/internal/events"
 	"kagiopenaiproxy/internal/kagi"
 	"kagiopenaiproxy/internal/logx"
-	"kagiopenaiproxy/internal/textutil"
 	"kagiopenaiproxy/internal/translate"
 )
 
@@ -197,7 +197,7 @@ func (r *turnRunner) logUsage(u *events.Usage) {
 		version = *u.ModelVersion
 	}
 	if u.CostUSD != nil {
-		cost = textutil.FormatFloat(*u.CostUSD)
+		cost = strconv.FormatFloat(*u.CostUSD, 'g', -1, 64)
 	}
 	logx.Info("turn completed: model=%s model_version=%s input_tokens=%d output_tokens=%d cost_usd=%s",
 		r.model, version, u.InputTokens, u.OutputTokens, cost)

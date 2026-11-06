@@ -1001,7 +1001,7 @@ func effortParams(def any, options ...any) obj {
 
 func effortCatalog() obj {
 	return obj{"models": obj{
-		"default_model": "glm-5-3-flash",
+		"default": "glm-5-3-flash",
 		"models": []any{
 			obj{"id": "glm-5-3-flash", "provider": "zai", "context_window": 128000, "supported": true, "supports_thinking": true, "parameters": effortParams("max", "low", "high", "max")},
 			obj{"id": "claude-haiku", "provider": "anthropic", "supported": true, "supports_thinking": true, "parameters": effortParams("low", "none", "low", "medium", "high", "max")},
@@ -1183,7 +1183,7 @@ func TestModelsListLiveCatalogMix(t *testing.T) {
 	models = append(models, obj{"id": "ki_quick", "supported": true, "parameters": obj{"reasoning_effort": nil}},
 		obj{"id": "mistral-large", "supported": true, "parameters": obj{"reasoning_effort": nil}})
 	fake := kagitest.New()
-	fake.InitJSON = obj{"models": obj{"default_model": "thinker-0", "models": models}}
+	fake.InitJSON = obj{"models": obj{"default": "thinker-0", "models": models}}
 	data := newEnv(t, fake).get("/v1/models", nil).json(t)["data"].([]any)
 	with := 0
 	for _, raw := range data {

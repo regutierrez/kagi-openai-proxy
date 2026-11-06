@@ -39,7 +39,7 @@ const (
 // Catalog is the default /api/init body.
 var Catalog = map[string]any{
 	"models": map[string]any{
-		"default_model": "kagi-default",
+		"default": "kagi-default",
 		"models": []any{
 			map[string]any{"id": "kagi-default", "provider": "kagi", "display_name": "Default", "context_window": 128000, "supported": true, "deprecated": false, "retired": false},
 			map[string]any{"id": "tiny", "provider": "acme", "display_name": "Tiny", "context_window": 100, "supported": true, "deprecated": false, "retired": false},

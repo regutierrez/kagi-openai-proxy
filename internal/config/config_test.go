@@ -45,7 +45,7 @@ func TestDefaultsAndOverrides(t *testing.T) {
 		t.Fatalf("defaults = %+v\nwant %+v", s, want)
 	}
 	for k, v := range map[string]string{
-		"PROXY_HOST": "localhost", "PROXY_PORT": "9000", "KAGI_BASE_URL": "http://x/", "KAGI_DELETE_THREADS": "no",
+		"PROXY_HOST": "localhost", "PROXY_PORT": "9000", "KAGI_BASE_URL": "http://x/", "KAGI_THREAD_LIFECYCLE": "keep",
 		"KAGI_PERSONALIZATION": "on", "KAGI_SEARCH_DEFAULT": "OFFLINE", "KAGI_MAX_CONCURRENCY": "2",
 		"KAGI_QUEUE_WAIT_SECONDS": "0.5", "KAGI_CONNECT_TIMEOUT": "5", "KAGI_READ_TIMEOUT": "60", "KAGI_MODELS_TTL": "0",
 	} {
@@ -60,7 +60,7 @@ func TestDefaultsAndOverrides(t *testing.T) {
 		s.ReadTimeout != time.Minute || s.ModelsTTL != 0 {
 		t.Fatalf("overrides = %+v", s)
 	}
-	for name, bad := range map[string]string{"KAGI_DELETE_THREADS": "maybe", "PROXY_PORT": "0", "KAGI_SEARCH_DEFAULT": "sometimes", "KAGI_READ_TIMEOUT": "-1"} {
+	for name, bad := range map[string]string{"KAGI_PERSONALIZATION": "maybe", "PROXY_PORT": "0", "KAGI_SEARCH_DEFAULT": "sometimes", "KAGI_READ_TIMEOUT": "-1"} {
 		vars := map[string]string{"KAGI_SESSION_TOKEN": "tok", "PROXY_API_KEY": strings.Repeat("k", 16), name: bad}
 		if _, err := FromEnv(env(vars)); err == nil {
 			t.Fatalf("%s=%s accepted", name, bad)
@@ -128,48 +128,20 @@ func TestThreadLifecycle(t *testing.T) {
 		vars["KAGI_SESSION_TOKEN"], vars["PROXY_API_KEY"] = "tok", strings.Repeat("k", 16)
 		return FromEnv(env(vars))
 	}
-	for _, c := range []struct {
-		vars    map[string]string
-		want    ThreadLifecycle
-		warning string
-	}{
-		{map[string]string{}, LifecycleDelete, ""}, // default: unchanged behavior
-		{map[string]string{"KAGI_THREAD_LIFECYCLE": "delete"}, LifecycleDelete, ""},
-		{map[string]string{"KAGI_THREAD_LIFECYCLE": " Temporary "}, LifecycleTemporary, ""},
-		{map[string]string{"KAGI_THREAD_LIFECYCLE": "keep"}, LifecycleKeep, ""},
-		{map[string]string{"KAGI_THREAD_LIFECYCLE": ""}, LifecycleDelete, ""},
-		// deprecated alias alone: mapped, with a warning
-		{map[string]string{"KAGI_DELETE_THREADS": "true"}, LifecycleDelete, "KAGI_DELETE_THREADS is deprecated; use KAGI_THREAD_LIFECYCLE=delete instead"},
-		{map[string]string{"KAGI_DELETE_THREADS": "false"}, LifecycleKeep, "KAGI_DELETE_THREADS is deprecated; use KAGI_THREAD_LIFECYCLE=keep instead"},
-		// both set and agreeing: fine, no warning
-		{map[string]string{"KAGI_THREAD_LIFECYCLE": "keep", "KAGI_DELETE_THREADS": "no"}, LifecycleKeep, ""},
-		{map[string]string{"KAGI_THREAD_LIFECYCLE": "delete", "KAGI_DELETE_THREADS": "1"}, LifecycleDelete, ""},
+	for raw, want := range map[string]ThreadLifecycle{
+		"": LifecycleTemporary, "delete": LifecycleDelete, " Temporary ": LifecycleTemporary, "keep": LifecycleKeep,
 	} {
-		s, err := load(c.vars)
-		if err != nil || s.ThreadLifecycle != c.want {
-			t.Fatalf("%v -> %q, %v; want %q", c.vars, s.ThreadLifecycle, err, c.want)
-		}
-		if got := strings.Join(s.Warnings, "|"); got != c.warning {
-			t.Fatalf("%v warnings = %q, want %q", c.vars, got, c.warning)
+		s, err := load(map[string]string{"KAGI_THREAD_LIFECYCLE": raw})
+		if err != nil || s.ThreadLifecycle != want {
+			t.Fatalf("%q -> %q, %v; want %q", raw, s.ThreadLifecycle, err, want)
 		}
 	}
-	for vars, want := range map[[2]string]string{
-		{"forever", ""}:        "KAGI_THREAD_LIFECYCLE must be delete, temporary or keep, got 'forever'",
-		{"", "maybe"}:          "KAGI_DELETE_THREADS must be true/false, got 'maybe'",
-		{"temporary", "true"}:  "KAGI_THREAD_LIFECYCLE=temporary conflicts with the deprecated KAGI_DELETE_THREADS=true (which means delete); unset KAGI_DELETE_THREADS",
-		{"temporary", "false"}: "KAGI_THREAD_LIFECYCLE=temporary conflicts with the deprecated KAGI_DELETE_THREADS=false (which means keep)",
-		{"delete", "false"}:    "conflicts with the deprecated KAGI_DELETE_THREADS=false",
-	} {
-		m := map[string]string{}
-		if vars[0] != "" {
-			m["KAGI_THREAD_LIFECYCLE"] = vars[0]
-		}
-		if vars[1] != "" {
-			m["KAGI_DELETE_THREADS"] = vars[1]
-		}
-		if _, err := load(m); err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("%v: err = %v, want %q", vars, err, want)
-		}
+	if s, err := load(map[string]string{}); err != nil || s.ThreadLifecycle != LifecycleTemporary {
+		t.Fatalf("default lifecycle = %q, %v", s.ThreadLifecycle, err)
+	}
+	if _, err := load(map[string]string{"KAGI_THREAD_LIFECYCLE": "forever"}); err == nil ||
+		!strings.Contains(err.Error(), `KAGI_THREAD_LIFECYCLE must be temporary, delete or keep, got "forever"`) {
+		t.Fatalf("err = %v", err)
 	}
 	if saved := LifecycleTemporary.IsSaved(); saved == nil || *saved {
 		t.Fatal("temporary must send is_saved=false")

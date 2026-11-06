@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +20,6 @@ import (
 	"kagiopenaiproxy/internal/events"
 	"kagiopenaiproxy/internal/redact"
 	"kagiopenaiproxy/internal/sse"
-	"kagiopenaiproxy/internal/textutil"
 )
 
 // UserAgent identifies the proxy honestly.
@@ -225,7 +225,7 @@ func upstreamDetail(body []byte) string {
 			}
 		}
 	}
-	text := strings.ReplaceAll(textutil.Strip(string(body)), "\n", " ")
+	text := strings.ReplaceAll(strings.TrimSpace(string(body)), "\n", " ")
 	if text == "" {
 		return "(empty body)"
 	}
@@ -349,7 +349,7 @@ func (c *Client) CreateTurn(ctx context.Context, content, model string, opts Tur
 // OpenTurnStream starts GET /api/v2/turns/{uuid}/stream and verifies its status. The
 // stream lives as long as ctx; Close it when done.
 func (c *Client) OpenTurnStream(ctx context.Context, assistantTurnUUID string) (*TurnStream, error) {
-	resp, err := c.send(ctx, http.MethodGet, "/api/v2/turns/"+quote(assistantTurnUUID)+"/stream", nil, "text/event-stream")
+	resp, err := c.send(ctx, http.MethodGet, "/api/v2/turns/"+url.PathEscape(assistantTurnUUID)+"/stream", nil, "text/event-stream")
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +372,7 @@ func (c *Client) OpenTurnStream(ctx context.Context, assistantTurnUUID string) (
 
 // DeleteConversation is DELETE /api/conversations/{uuid}.
 func (c *Client) DeleteConversation(ctx context.Context, conversationUUID string) error {
-	path := "/api/conversations/" + quote(conversationUUID)
+	path := "/api/conversations/" + url.PathEscape(conversationUUID)
 	what := "DELETE " + path
 	resp, err := c.send(ctx, http.MethodDelete, path, nil, "application/json")
 	if err != nil {
@@ -387,21 +387,6 @@ func (c *Client) DeleteConversation(ctx context.Context, conversationUUID string
 		return serr
 	}
 	return nil
-}
-
-// quote is Python's urllib.parse.quote(s, safe=""): everything but unreserved
-// characters is percent-encoded.
-func quote(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || strings.IndexByte("_.-~", ch) >= 0 {
-			b.WriteByte(ch)
-		} else {
-			fmt.Fprintf(&b, "%%%02X", ch)
-		}
-	}
-	return b.String()
 }
 
 // TurnStream is an open turn stream.

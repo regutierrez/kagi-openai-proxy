@@ -60,6 +60,7 @@ func newEnv(t *testing.T, fake *kagitest.Fake, mods ...func(*config.Settings)) *
 	t.Helper()
 	s := config.Defaults(kagitest.Token, kagitest.Key)
 	s.KagiBaseURL = fake.URL()
+	s.ThreadLifecycle = config.LifecycleDelete // most tests check the delete-after-turn cleanup
 	s.Keepalive = 60 * time.Second
 	for _, mod := range mods {
 		mod(&s)

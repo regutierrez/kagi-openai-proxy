@@ -190,7 +190,7 @@ func TestRequestParsingRules(t *testing.T) {
 	if _, err := ParseChatRequest(decode(t, `{"model": "m", "messages": [{"role": "user", "content": "x"}], "top_p": 1}`)); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(logs.String(), "'top_p'"); n != 1 { // once per process per key
+	if n := strings.Count(logs.String(), `"top_p"`); n != 1 { // once per process per key
 		t.Fatalf("top_p logged %d times", n)
 	}
 	if req, _ := ParseChatRequest(decode(t, `{"messages": [{"role": "user", "content": "x"}], "stream_options": {"include_usage": true}}`)); req.IncludeUsage {
@@ -242,9 +242,9 @@ func TestModelSuffixResolution(t *testing.T) {
 		}
 	}
 	for in, want := range map[string]string{
-		"glm-5-3-flash:fast":           "unknown suffix ':fast'",
-		"glm-5-3-flash:LOW":            "unknown suffix ':LOW'",
-		"glm-5-3-flash:low:":           "unknown suffix ':'",
+		"glm-5-3-flash:fast":           `unknown suffix ":fast"`,
+		"glm-5-3-flash:LOW":            `unknown suffix ":LOW"`,
+		"glm-5-3-flash:low:":           `unknown suffix ":"`,
 		"glm-5-3-flash:online:offline": "both :online and :offline",
 		"glm-5-3-flash:low:high":       "conflicting reasoning effort suffixes :low and :high",
 		":online":                      "no model id before its suffixes",

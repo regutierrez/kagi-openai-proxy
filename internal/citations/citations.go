@@ -8,8 +8,7 @@ package citations
 import (
 	"strconv"
 	"strings"
-
-	"kagiopenaiproxy/internal/textutil"
+	"unicode/utf8"
 )
 
 // MaxHeld caps the held tail of an unclosed marker; longer tails are released raw.
@@ -59,7 +58,7 @@ func (r *Rewriter) Feed(text string) string {
 		closeIdx := strings.Index(s[j+len(open):], "]")
 		if closeIdx == -1 {
 			tail := s[j:]
-			if textutil.Len(tail) > MaxHeld {
+			if utf8.RuneCountInString(tail) > MaxHeld {
 				// Too long to be a marker: release the opener raw and keep scanning
 				// (a later "[^" in the tail is still eligible).
 				out.WriteString(open)

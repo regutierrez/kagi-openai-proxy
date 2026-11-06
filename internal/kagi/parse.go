@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"kagiopenaiproxy/internal/events"
 	"kagiopenaiproxy/internal/logx"
 	"kagiopenaiproxy/internal/redact"
-	"kagiopenaiproxy/internal/textutil"
 )
 
 // ProtocolDriftCode marks malformed protocol data.
@@ -57,26 +57,21 @@ func DecodeJSON(data []byte) (any, error) {
 	return v, nil
 }
 
-// pyType names a JSON value's Python type, for diagnostics.
-func pyType(v any) string {
-	switch x := v.(type) {
+// jsonType names a JSON value's type, for diagnostics.
+func jsonType(v any) string {
+	switch v.(type) {
 	case nil:
-		return "NoneType"
+		return "null"
 	case bool:
-		return "bool"
+		return "boolean"
 	case string:
-		return "str"
+		return "string"
 	case json.Number:
-		if isIntLiteral(x) {
-			return "int"
-		}
-		return "float"
+		return "number"
 	case []any:
-		return "list"
-	case map[string]any:
-		return "dict"
+		return "array"
 	}
-	return fmt.Sprintf("%T", v)
+	return "object"
 }
 
 func isIntLiteral(n json.Number) bool { return !strings.ContainsAny(n.String(), ".eE") }
@@ -115,22 +110,18 @@ func nonEmptyString(v any) (string, bool) {
 func ParseFrame(data string) []events.Event {
 	parsed, err := DecodeJSON([]byte(data))
 	if err != nil {
-		return []events.Event{drift(fmt.Sprintf("unparseable frame (%d chars)", textutil.Len(data)))}
+		return []events.Event{drift(fmt.Sprintf("unparseable frame (%d chars)", utf8.RuneCountInString(data)))}
 	}
 	obj, ok := asMap(parsed)
 	if !ok {
-		return []events.Event{drift(fmt.Sprintf("frame is a JSON %s, not an object", pyType(parsed)))}
+		return []events.Event{drift(fmt.Sprintf("frame is a JSON %s, not an object", jsonType(parsed)))}
 	}
 	var out []events.Event
 	if event, present := obj["event"]; present { // absent key = e.g. a title-only frame
 		if m, isObject := asMap(event); isObject {
 			out = append(out, parseEvent(m))
 		} else {
-			kind := pyType(event)
-			if event == nil {
-				kind = "null"
-			}
-			out = append(out, drift(fmt.Sprintf("'event' is %s, not an object", kind)))
+			out = append(out, drift(fmt.Sprintf("'event' is %s, not an object", jsonType(event))))
 		}
 	}
 	if frameErr := obj["error"]; Truthy(frameErr) {
@@ -168,7 +159,7 @@ func unknown(kind string) events.Unknown {
 		loggedUnknown[kind] = true
 		loggedUnknownMu.Unlock()
 		if first {
-			logx.Info("Kagi stream: ignoring unknown event type %s (logged once)", textutil.Repr(kind))
+			logx.Info("Kagi stream: ignoring unknown event type %s (logged once)", strconv.Quote(kind))
 		}
 	}
 	return events.Unknown{Type: kind}
@@ -224,7 +215,10 @@ func parseEvent(event map[string]any) events.Event {
 		return events.TurnCompleted{Usage: parseUsage(payload["usage"])}
 	case "turn.failed", "turn.cancelled":
 		code, ok := nonEmptyString(payload["error_code"])
-		if !ok {
+		if !ok && kind == "turn.cancelled" {
+			// Verified live: a user cancel carries {"reason": "cancelled"} and no error_code.
+			code = "kagi_turn_cancelled"
+		} else if !ok {
 			return drift(kind + " without payload.error_code")
 		}
 		raw := payload["message"]
@@ -301,7 +295,6 @@ type ModelInfo struct {
 	Provider         string // "" when absent
 	DisplayName      string
 	ContextWindow    int // 0 when unknown
-	SupportsThinking bool
 	// ReasoningEfforts is the model's reasoning_effort option list, in catalog order;
 	// nil when the catalog does not list one (then only the global set applies).
 	ReasoningEfforts []string
@@ -355,11 +348,10 @@ func ParseCatalog(obj any) (*Catalog, error) {
 				info.ContextWindow = cw
 			}
 		}
-		info.SupportsThinking, _ = item["supports_thinking"].(bool)
 		info.ReasoningEfforts, info.ReasoningEffortDefault = effortOptions(item)
 		catalog.Models = append(catalog.Models, info)
 	}
-	catalog.DefaultID = findDefaultModel(root, section)
+	catalog.DefaultID, _ = section["default"].(string)
 	if catalog.DefaultID == "" && len(catalog.Models) > 0 {
 		catalog.DefaultID = catalog.Models[0].ID
 		logx.Warn("Kagi catalog has no recognizable default model id; using %s", catalog.DefaultID)
@@ -367,61 +359,20 @@ func ParseCatalog(obj any) (*Catalog, error) {
 	return catalog, nil
 }
 
-// effortOptions reads a model's reasoning_effort options and default. The live shape
-// (verified) is model.parameters.reasoning_effort = {"options": [...], "default": "max"}
-// or null; default may be null. When parameters carries the key, it decides (null ->
-// no list). Only if it is absent are older guesses tried as fallbacks: a top-level
-// reasoning_effort holding a list (of strings or {value|id|name} objects), optionally
-// wrapped in {"options"|"values": [...]}. Anything else -> nil (unknown).
+// effortOptions reads model.parameters.reasoning_effort, which is
+// {"options": [...], "default": "max"} (default may be null) or null (no list).
 func effortOptions(item map[string]any) (options []string, def string) {
-	raw, found := item["reasoning_effort"]
-	if params, ok := asMap(item["parameters"]); ok {
-		if v, present := params["reasoning_effort"]; present {
-			raw, found = v, true
-		}
-	}
-	if !found {
+	params, _ := asMap(item["parameters"])
+	effort, ok := asMap(params["reasoning_effort"])
+	if !ok {
 		return nil, ""
 	}
-	if wrapper, ok := asMap(raw); ok {
-		def, _ = wrapper["default"].(string)
-		raw = wrapper["options"]
-		if raw == nil {
-			raw = wrapper["values"]
-		}
-	}
-	list, ok := raw.([]any)
-	if !ok {
-		return nil, def
-	}
+	def, _ = effort["default"].(string)
+	list, _ := effort["options"].([]any)
 	for _, entry := range list {
-		value, ok := entry.(string)
-		if m, isObject := asMap(entry); isObject {
-			for _, key := range []string{"value", "id", "name"} {
-				if value, ok = m[key].(string); ok {
-					break
-				}
-			}
-		}
-		if ok && value != "" && !slices.Contains(options, value) {
+		if value, ok := entry.(string); ok && value != "" && !slices.Contains(options, value) {
 			options = append(options, value)
 		}
 	}
 	return options, def
-}
-
-// findDefaultModel tries the plausible spellings in the models section, then the top level.
-func findDefaultModel(root, section map[string]any) string {
-	for _, container := range []map[string]any{section, root} {
-		for _, key := range []string{"default", "default_model", "default_model_id", "default_id"} {
-			value := container[key]
-			if m, ok := asMap(value); ok {
-				value = m["id"]
-			}
-			if s, ok := nonEmptyString(value); ok {
-				return s
-			}
-		}
-	}
-	return ""
 }

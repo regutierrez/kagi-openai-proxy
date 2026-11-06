@@ -9,15 +9,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"kagiopenaiproxy/internal/citations"
 	"kagiopenaiproxy/internal/events"
 	"kagiopenaiproxy/internal/kagi"
 	"kagiopenaiproxy/internal/logx"
 	"kagiopenaiproxy/internal/redact"
-	"kagiopenaiproxy/internal/textutil"
 )
 
 // ------------------------------------------------------------------------- errors
@@ -170,17 +172,17 @@ func ParseChatRequest(body any) (ChatRequest, *TurnError) {
 		loggedIgnored[key] = true
 		loggedIgnoredMu.Unlock()
 		if first {
-			logx.Info("ignoring unsupported request parameter %s (logged once)", textutil.Repr(key))
+			logx.Info("ignoring unsupported request parameter %s (logged once)", strconv.Quote(key))
 		}
 	}
 
 	var req ChatRequest
 	if raw, present := obj["model"]; present && raw != nil {
 		model, ok := raw.(string)
-		if !ok || textutil.Strip(model) == "" {
+		if !ok || strings.TrimSpace(model) == "" {
 			return ChatRequest{}, InvalidRequest("'model' must be a non-empty string")
 		}
-		req.Model = textutil.Strip(model)
+		req.Model = strings.TrimSpace(model)
 	}
 	if raw := obj["temperature"]; raw != nil {
 		if _, ok := raw.(json.Number); !ok {
@@ -194,7 +196,7 @@ func ParseChatRequest(body any) (ChatRequest, *TurnError) {
 		}
 		if !kagi.IsReasoningEffort(effort) {
 			return ChatRequest{}, invalidEffort(fmt.Sprintf("'reasoning_effort' %s is not supported; use one of: %s",
-				textutil.Repr(effort), strings.Join(kagi.ReasoningEfforts, ", ")))
+				strconv.Quote(effort), strings.Join(kagi.ReasoningEfforts, ", ")))
 		}
 		req.ReasoningEffort = effort
 	}
@@ -229,7 +231,7 @@ func ParseChatRequest(body any) (ChatRequest, *TurnError) {
 		name, _ := msg["role"].(string)
 		role, known := roleMap[name]
 		if _, isString := msg["role"].(string); !isString || !known {
-			return ChatRequest{}, InvalidRequest(fmt.Sprintf("messages[%d].role %s is not supported", i, textutil.Repr(msg["role"])))
+			return ChatRequest{}, InvalidRequest(fmt.Sprintf("messages[%d].role %v is not supported", i, msg["role"]))
 		}
 		content, terr := NormalizeContent(msg["content"])
 		if terr != nil {
@@ -274,25 +276,25 @@ func ParseModel(requested string, defaultOnline bool) (ModelSpec, *TurnError) {
 	parts := strings.Split(requested, ":")
 	spec := ModelSpec{Model: parts[0], EnableSearch: defaultOnline}
 	if spec.Model == "" {
-		return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has no model id before its suffixes", textutil.Repr(requested)))
+		return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has no model id before its suffixes", strconv.Quote(requested)))
 	}
 	search := ""
 	for _, token := range parts[1:] {
 		switch {
 		case token == "online" || token == "offline":
 			if search != "" && search != token {
-				return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has both :online and :offline", textutil.Repr(requested)))
+				return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has both :online and :offline", strconv.Quote(requested)))
 			}
 			search = token
 		case kagi.IsReasoningEffort(token):
 			if spec.ReasoningEffort != "" && spec.ReasoningEffort != token {
 				return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has conflicting reasoning effort suffixes :%s and :%s",
-					textutil.Repr(requested), spec.ReasoningEffort, token))
+					strconv.Quote(requested), spec.ReasoningEffort, token))
 			}
 			spec.ReasoningEffort = token
 		default:
 			return ModelSpec{}, invalidSuffix(fmt.Sprintf("model %s has unknown suffix %s; suffixes are online, offline, or a reasoning effort (%s)",
-				textutil.Repr(requested), textutil.Repr(":"+token), strings.Join(kagi.ReasoningEfforts, ", ")))
+				strconv.Quote(requested), strconv.Quote(":"+token), strings.Join(kagi.ReasoningEfforts, ", ")))
 		}
 	}
 	if search != "" {
@@ -304,7 +306,7 @@ func ParseModel(requested string, defaultOnline bool) (ModelSpec, *TurnError) {
 // UnsupportedEffort is the 400 for an effort the model's catalog entry does not list.
 func UnsupportedEffort(model, effort string, supported []string) *TurnError {
 	return NewTurnError(400, "invalid_request_error", "unsupported_reasoning_effort", fmt.Sprintf(
-		"model %s does not support reasoning_effort %s; supported: %s", textutil.Repr(model), textutil.Repr(effort), strings.Join(supported, ", ")))
+		"model %s does not support reasoning_effort %s; supported: %s", strconv.Quote(model), strconv.Quote(effort), strings.Join(supported, ", ")))
 }
 
 // ---------------------------------------------------------------------- flattening
@@ -336,7 +338,7 @@ func Flatten(messages []Message, contextWindow int) string {
 	var systemParts, lines []string
 	for _, m := range messages {
 		if m.Role == RoleSystem {
-			if textutil.Strip(m.Content) != "" {
+			if strings.TrimSpace(m.Content) != "" {
 				systemParts = append(systemParts, m.Content)
 			}
 			continue
@@ -351,14 +353,14 @@ func Flatten(messages []Message, contextWindow int) string {
 	text := render(system, lines, false)
 	dropped := 0
 	// Drop the oldest turns; never the system block, never the last message.
-	for textutil.Len(text) > budget && len(lines)-dropped > 1 {
+	for utf8.RuneCountInString(text) > budget && len(lines)-dropped > 1 {
 		dropped++
 		text = render(system, lines[dropped:], true)
 	}
 	if dropped > 0 {
 		logx.Info("prompt over budget (%d chars): omitted %d oldest message(s)", budget, dropped)
 	}
-	if n := textutil.Len(text); n > budget {
+	if n := utf8.RuneCountInString(text); n > budget {
 		logx.Warn("prompt still exceeds budget after truncation (%d > %d chars)", n, budget)
 	}
 	return text
@@ -408,7 +410,7 @@ func (a *Assembler) Feed(event events.Event) string {
 		if !known {
 			if !a.warnedUnknownNode {
 				a.warnedUnknownNode = true
-				logx.Warn("delta for unknown node %s; treating it as answer text", textutil.Repr(e.NodeID))
+				logx.Warn("delta for unknown node %s; treating it as answer text", strconv.Quote(e.NodeID))
 			}
 			kind = "text"
 		}
@@ -431,17 +433,17 @@ func (a *Assembler) emit(text string) string {
 	if !a.firstTextSeen {
 		// Some models lead with whitespace: strip it from the very first text delta only.
 		a.firstTextSeen = true
-		text = textutil.LStrip(text)
+		text = strings.TrimLeftFunc(text, unicode.IsSpace)
 	}
 	out := a.citations.Feed(text)
-	a.emittedChars += textutil.Len(out)
+	a.emittedChars += utf8.RuneCountInString(out)
 	return out
 }
 
 // Finish ends the stream: it returns the held text to emit and the error, if any.
 func (a *Assembler) Finish(interrupted *TurnError) (string, *TurnError) {
 	tail := a.citations.Flush()
-	a.emittedChars += textutil.Len(tail)
+	a.emittedChars += utf8.RuneCountInString(tail)
 	if f := a.Failure; f != nil {
 		if f.RateLimited {
 			return tail, NewTurnError(429, "rate_limit_error", f.Code, f.Message)

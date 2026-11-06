@@ -247,23 +247,12 @@ func (p *Proxy) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 
 var knownRoutes = map[string]string{"/health": "GET, HEAD", "/v1/models": "GET, HEAD", "/v1/chat/completions": "POST"}
 
-// notFound answers unrouted requests the way the reference does: 405 for a known path
-// with the wrong method, a redirect for a known path with a trailing slash, else 404.
+// notFound answers unrouted requests: 405 for a known path with the wrong method, else 404.
 func (p *Proxy) notFound(w http.ResponseWriter, r *http.Request) {
 	if allow, ok := knownRoutes[r.URL.Path]; ok {
 		w.Header().Set("Allow", allow)
 		writeError(w, translate.NewTurnError(405, "invalid_request_error", "http_405", "Method Not Allowed"))
 		return
-	}
-	if trimmed := strings.TrimSuffix(r.URL.Path, "/"); trimmed != r.URL.Path {
-		if _, ok := knownRoutes[trimmed]; ok {
-			target := "http://" + r.Host + trimmed
-			if r.URL.RawQuery != "" {
-				target += "?" + r.URL.RawQuery
-			}
-			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
-			return
-		}
 	}
 	writeError(w, translate.NewTurnError(404, "invalid_request_error", "http_404", "Not Found"))
 }
@@ -271,12 +260,7 @@ func (p *Proxy) notFound(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------- routes
 
 func (p *Proxy) health(w http.ResponseWriter, r *http.Request) {
-	values := r.URL.Query()["deep"]
-	deep := ""
-	if len(values) > 0 {
-		deep = strings.ToLower(values[len(values)-1]) // last value wins, like the reference
-	}
-	if deep != "1" && deep != "true" && deep != "yes" {
+	if deep := r.URL.Query().Get("deep"); deep != "1" && deep != "true" {
 		writeJSON(w, 200, map[string]string{"status": "ok", "version": Version})
 		return
 	}
@@ -319,7 +303,7 @@ func (p *Proxy) listModels(w http.ResponseWriter, r *http.Request) {
 	}
 	catalog, lastErr := p.catalog.get(context.WithoutCancel(r.Context()))
 	if catalog == nil {
-		writeError(w, translate.NewTurnError(503, "api_error", "kagi_catalog_unavailable", "Kagi model catalog unavailable: "+orNone(lastErr)))
+		writeError(w, translate.NewTurnError(503, "api_error", "kagi_catalog_unavailable", "Kagi model catalog unavailable: "+lastErr))
 		return
 	}
 	data := make([]modelEntry, 0, len(catalog.Models))
@@ -334,13 +318,6 @@ func (p *Proxy) listModels(w http.ResponseWriter, r *http.Request) {
 		Object string       `json:"object"`
 		Data   []modelEntry `json:"data"`
 	}{"list", data})
-}
-
-func orNone(s string) string {
-	if s == "" {
-		return "None"
-	}
-	return s
 }
 
 func newCompletionID() string {
