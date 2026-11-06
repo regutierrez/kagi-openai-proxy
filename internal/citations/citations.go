@@ -7,6 +7,10 @@
 // the Markdown link [[n]](url); one without a URL becomes [^n]. Unknown ref_ids pass
 // through unchanged. An opened-but-unclosed marker is held back (up to MaxHeld
 // characters) so markers split across deltas are rewritten correctly.
+//
+// Models sometimes end an answer with footnote definitions ("[^ref_id]: url" on its
+// own line). For a known source the whole line is dropped: clients get the sources
+// separately, and the rewritten line would read "[[1]](url): url".
 package citations
 
 import (
@@ -33,10 +37,14 @@ type Rewriter struct {
 	byID    map[string]int // base ref_id -> index in sources
 	sources []Source
 	held    string
+	// atLineStart: the emitted text is empty or ends with a newline.
+	atLineStart bool
+	// skipping: inside a dropped footnote definition line, until its newline.
+	skipping bool
 }
 
 // New returns an empty Rewriter.
-func New() *Rewriter { return &Rewriter{byID: map[string]int{}} }
+func New() *Rewriter { return &Rewriter{byID: map[string]int{}, atLineStart: true} }
 
 // AddReference registers a source. It returns the numbered source and whether it is
 // new; a repeated ref_id keeps its first number.
@@ -59,7 +67,19 @@ func (r *Rewriter) Feed(text string) string {
 	s := r.held + text
 	r.held = ""
 	var out strings.Builder
+	defer func() {
+		if out.Len() > 0 {
+			r.atLineStart = strings.HasSuffix(out.String(), "\n")
+		}
+	}()
 	i := 0
+	if r.skipping {
+		nl := strings.IndexByte(s, '\n')
+		if nl < 0 {
+			return ""
+		}
+		r.skipping, i = false, nl+1
+	}
 	for {
 		j := strings.Index(s[i:], open)
 		if j == -1 {
@@ -96,16 +116,46 @@ func (r *Rewriter) Feed(text string) string {
 			i = j + len(open)
 			continue
 		}
+		if _, known := r.byID[baseID(marker[len(open):len(marker)-1])]; known && r.lineStartAt(s, j, &out) {
+			if closeIdx+1 == len(s) {
+				r.held = marker // a ":" may follow in the next delta
+				break
+			}
+			if s[closeIdx+1] == ':' { // footnote definition: drop the line
+				nl := strings.IndexByte(s[closeIdx+1:], '\n')
+				if nl < 0 {
+					r.skipping = true
+					break
+				}
+				i = closeIdx + 1 + nl + 1
+				continue
+			}
+		}
 		out.WriteString(r.rewrite(marker))
 		i = closeIdx + 1
 	}
 	return out.String()
 }
 
-// Flush releases any held text raw (end of stream).
+// lineStartAt reports whether position j of s begins a line of the emitted text.
+func (r *Rewriter) lineStartAt(s string, j int, out *strings.Builder) bool {
+	if j > 0 {
+		return s[j-1] == '\n'
+	}
+	if out.Len() > 0 {
+		return strings.HasSuffix(out.String(), "\n")
+	}
+	return r.atLineStart
+}
+
+// Flush releases any held text (end of stream): a complete marker is rewritten, an
+// incomplete one is released raw.
 func (r *Rewriter) Flush() string {
 	held := r.held
-	r.held = ""
+	r.held, r.skipping = "", false
+	if strings.HasPrefix(held, open) && strings.HasSuffix(held, "]") {
+		return r.rewrite(held)
+	}
 	return held
 }
 

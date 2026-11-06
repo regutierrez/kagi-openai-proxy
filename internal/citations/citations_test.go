@@ -119,3 +119,23 @@ func TestStrayOpenerBeforeRealMarker(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestFootnoteDefinitionLinesForKnownSourcesAreDropped(t *testing.T) {
+	r := New()
+	r.AddReference(events.ReferenceAdded{RefID: "fe3f5a", URL: "https://en.wikipedia.org/wiki/Lyon"})
+	// Live shape: the answer cites, then ends with a definition, split across deltas.
+	got := strings.Join(run(r, "Lyon has 519,000 people. [^fe3f5a]\n\n", "[^fe3f5a]", ": https://en.wikipedia.org/wiki/Lyon\n[^unknown]: kept\n", "Bye"), "")
+	if want := "Lyon has 519,000 people. [[1]](https://en.wikipedia.org/wiki/Lyon)\n\n[^unknown]: kept\nBye"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// A definition with no trailing newline is dropped up to the end of the stream.
+	if got := strings.Join(run(rewriter("a"), "x\n[^a]: http", "s://a.example"), ""); got != "x\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestMarkerAtLineStartWithoutColonIsStillRewritten(t *testing.T) {
+	eq(t, run(rewriter("a"), "[^a]", " opens the line"), []string{"", "[^1] opens the line", ""})
+	eq(t, run(rewriter("a"), "x\n[^a]"), []string{"x\n", "[^1]"}) // held marker rewritten at the end
+	eq(t, run(rewriter("a"), "mid [^a]: not at line start"), []string{"mid [^1]: not at line start", ""})
+}
