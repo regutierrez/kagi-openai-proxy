@@ -35,6 +35,8 @@ const (
 	Stream     = "GET " + StreamPath
 	Delete     = "DELETE " + DeletePath
 	Cancel     = "POST /api/v2/turns/" + Turn + "/cancel"
+	Branch     = "branch-1"
+	Respond    = "POST /api/v2/branches/" + Branch + "/respond"
 	Init       = "GET /api/init"
 )
 
@@ -55,7 +57,7 @@ var Catalog = map[string]any{
 // Created is the default create-conversation body.
 var Created = map[string]any{
 	"conversation":        map[string]any{"uuid": Conv, "title": "", "created_at": "", "updated_at": "", "is_saved": false, "is_shared": false, "model_name": "kagi-default", "folder_uuid": nil},
-	"branch_uuid":         "branch-1",
+	"branch_uuid":         Branch,
 	"assistant_turn_uuid": Turn,
 }
 
@@ -288,6 +290,9 @@ func (f *Fake) handle(w http.ResponseWriter, r *http.Request) {
 		} else {
 			f.serveChunked(w, r, cancelled)
 		}
+	case Respond: // live shape: ids at the top level, no conversation object
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"conversation_uuid": Conv, "branch_uuid": Branch, "assistant_turn_uuid": Turn, "user_turn_uuid": "user-2"})
 	case Cancel:
 		w.WriteHeader(http.StatusNoContent)
 	case Delete:

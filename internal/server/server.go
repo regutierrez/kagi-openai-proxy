@@ -130,6 +130,7 @@ func New(settings config.Settings) *Proxy {
 	mux.HandleFunc("GET /health", p.health)
 	mux.HandleFunc("GET /v1/models", p.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", p.chatCompletions)
+	mux.HandleFunc("POST /v1/ask", p.ask)
 	mux.HandleFunc("/", p.notFound)
 	p.handler = hostAllowList(settings.AllowedHosts, mux)
 	return p
@@ -245,7 +246,7 @@ func (p *Proxy) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-var knownRoutes = map[string]string{"/health": "GET, HEAD", "/v1/models": "GET, HEAD", "/v1/chat/completions": "POST"}
+var knownRoutes = map[string]string{"/health": "GET, HEAD", "/v1/models": "GET, HEAD", "/v1/chat/completions": "POST", "/v1/ask": "POST"}
 
 // notFound answers unrouted requests: 405 for a known path with the wrong method, else 404.
 func (p *Proxy) notFound(w http.ResponseWriter, r *http.Request) {
@@ -426,9 +427,12 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			"another Kagi turn is in progress; waited %ss for a free slot", strconv.FormatFloat(settings.QueueWait.Seconds(), 'g', -1, 64))))
 		return
 	}
-	runner, terr := p.startTurn(content, modelID, kagi.TurnOptions{
+	opts := kagi.TurnOptions{
 		EnableSearch: spec.EnableSearch, Personalization: settings.Personalization, ReasoningEffort: effort,
 		IsSaved: settings.ThreadLifecycle.IsSaved(),
+	}
+	runner, terr := p.startTurn(modelID, settings.ThreadLifecycle.DeletesThreads(), func(ctx context.Context) (kagi.CreatedTurn, error) {
+		return p.kagi.CreateTurn(ctx, content, modelID, opts)
 	})
 	if terr != nil {
 		writeError(w, terr)
@@ -476,10 +480,10 @@ func (p *Proxy) resolveEffort(catalog *kagi.Catalog, modelID, fromRequest, fromS
 	return "", nil
 }
 
-// startTurn creates the Kagi turn and opens its stream while holding the slot. On
-// success the slot belongs to the returned runner; on failure it is released here.
-func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turnRunner, *translate.TurnError) {
-	settings := p.settings
+// startTurn starts the Kagi turn (create submits it) and opens its stream while
+// holding the slot. On success the slot belongs to the returned runner; on failure it
+// is released here. deleteThread deletes the thread after the turn and after failures.
+func (p *Proxy) startTurn(modelID string, deleteThread bool, create func(context.Context) (kagi.CreatedTurn, error)) (*turnRunner, *translate.TurnError) {
 	turnCtx, cancelTurn := context.WithCancel(p.baseCtx)
 	cleanupCtx := context.WithoutCancel(p.baseCtx)
 	fail := func(kerr *kagi.Error) *translate.TurnError {
@@ -487,12 +491,12 @@ func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turn
 		p.releaseSlot()
 		return kagiErrorToOpenAI(kerr)
 	}
-	created, err := p.kagi.CreateTurn(turnCtx, content, modelID, opts)
+	created, err := create(turnCtx)
 	if err != nil {
 		var kerr *kagi.Error
 		errors.As(err, &kerr)
 		logx.Warn("Kagi request failed: %s", kerr.Message)
-		if kerr.ConversationUUID != "" && settings.ThreadLifecycle.DeletesThreads() {
+		if kerr.ConversationUUID != "" && deleteThread {
 			deleteThreadQuietly(cleanupCtx, p.kagi, kerr.ConversationUUID)
 		}
 		return nil, fail(kerr)
@@ -501,7 +505,7 @@ func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turn
 	if err != nil {
 		var kerr *kagi.Error
 		errors.As(err, &kerr)
-		if settings.ThreadLifecycle.DeletesThreads() {
+		if deleteThread {
 			deleteThreadQuietly(cleanupCtx, p.kagi, created.ConversationUUID)
 		}
 		logx.Warn("Kagi request failed: %s", kerr.Message)
@@ -514,10 +518,11 @@ func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turn
 		cancelUpstream:   cancelTurn,
 		deleteCtx:        cleanupCtx,
 		conversationUUID: created.ConversationUUID,
+		branchUUID:       created.BranchUUID,
 		turnUUID:         created.AssistantTurnUUID,
 		model:            modelID,
-		deleteThread:     settings.ThreadLifecycle.DeletesThreads(),
-		drainTimeout:     settings.DrainTimeout,
+		deleteThread:     deleteThread,
+		drainTimeout:     p.settings.DrainTimeout,
 		release:          p.releaseSlot,
 		consumerPresent:  true,
 		reading:          true,

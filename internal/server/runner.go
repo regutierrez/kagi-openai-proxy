@@ -94,6 +94,7 @@ type turnRunner struct {
 	cancelUpstream   context.CancelFunc
 	deleteCtx        context.Context
 	conversationUUID string
+	branchUUID       string
 	turnUUID         string
 	model            string
 	deleteThread     bool
