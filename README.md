@@ -1,76 +1,48 @@
-# kagi-openai-proxy (Go)
+# kagi-openai-proxy
 
 > [!WARNING]
 > **this works perfectly but this is pure vibeslop. you have been warned.**
 
-A personal, single-user, **localhost-first** proxy that exposes Kagi Assistant
-(`https://assistant.kagi.com`) as an OpenAI-compatible Chat Completions API. Point
-Raycast's Custom Providers (or any client with a configurable OpenAI `base_url`) at it
-and chat with the models in your paid Kagi plan.
+A personal, single-user proxy for Kagi Assistant (`https://assistant.kagi.com`). It
+offers two APIs over your logged-in Kagi session:
 
-This is the Go port of the Python `kagi-openai-proxy` (reference commit `2527cd9`): one
-static binary, standard library only, no runtime or virtualenv. Behaviour is the same;
-the one intentional difference is described under [Disconnects](#disconnects).
+- **`POST /v1/chat/completions`**: OpenAI-compatible, for Raycast Custom Providers and
+  any client with a configurable OpenAI `base_url`.
+- **`POST /v1/ask`**: a typed event stream for web-search clients you write yourself:
+  search steps, sources, answer text, and follow-ups in the same Kagi thread.
 
-Kagi has **no official Assistant API**. This proxy wraps the undocumented web API the
-Assistant web app uses. See [Risks and terms](#risks-and-terms) before using it.
+Kagi has **no official Assistant API**. The proxy wraps the undocumented web API the
+Assistant web app uses; [PROTOCOL.md](PROTOCOL.md) lists the wire facts it relies on.
+Read [Risks](#risks) before using it. One static Go binary, standard library only.
 
-The authoritative behaviour spec is [SPEC.md](SPEC.md).
+## Endpoints
 
-## What it does
+| Endpoint | Auth | Behaviour |
+| --- | --- | --- |
+| `GET /health` | no | `{"status": "ok", "version": ...}`, no Kagi call |
+| `GET /health?deep=1` | yes | Also calls Kagi `GET /api/init`; 503 unless Kagi answers 2xx JSON |
+| `GET /v1/models` | yes | Kagi's usable models (cached `KAGI_MODELS_TTL`, stale copy on refresh failure, 503 if never fetched), with non-standard `reasoning_efforts` and `reasoning_effort_default` per model |
+| `POST /v1/chat/completions` | yes | OpenAI Chat Completions, streaming or not |
+| `POST /v1/ask` | yes | Typed event stream, see [/v1/ask](#v1ask) |
 
-| Endpoint | Behaviour |
-| --- | --- |
-| `GET /health` | `{"status": "ok", "version": ...}`, no upstream call, no auth |
-| `GET /health?deep=1` | Also calls Kagi `GET /api/init`; 200 only if Kagi answers 2xx JSON, else 503 (requires auth) |
-| `GET /v1/models` | Kagi's model catalog (supported, not deprecated/retired), cached for `KAGI_MODELS_TTL`; stale copy served if a refresh fails; 503 if never fetched |
-| `POST /v1/chat/completions` | Streaming and non-streaming |
+Auth is `Authorization: Bearer <PROXY_API_KEY>`. Every successful chat or ask response
+carries `X-Kagi-Thread: <conversation uuid>`.
 
-Every request is turned into **one new Kagi thread**: the whole OpenAI message list is
-flattened into a single prompt (system instructions + transcript), sent, streamed back,
-and then, by default, left as a Kagi *Temporary* thread that expires on its own (see
-[Kagi threads](#kagi-threads) for the `delete` and `keep` modes). There is no
-conversation cache in v0.1, so long chats resend their history each turn. When the
-flattened prompt exceeds ~70% of the model's context window, the oldest messages are
-dropped and replaced by `[...earlier messages omitted...]`.
+Shared behaviour:
 
-Other behaviour:
+- **One Kagi turn at a time** by default (`KAGI_MAX_CONCURRENCY`). Extra requests wait
+  up to `KAGI_QUEUE_WAIT_SECONDS`, then get 429 `proxy_busy`. Turns are never retried.
+- **Cancel on disconnect:** if the client leaves before the answer ends, the proxy
+  cancels the Kagi turn (`POST /api/v2/turns/{uuid}/cancel`). The stream then ends in
+  well under a second and the slot frees. If Kagi keeps streaming anyway, the proxy
+  stops reading after 600 s.
+- **Citations:** sources are numbered 1, 2, ... in the order Kagi sends them. A
+  citation becomes the Markdown link `[[n]](url)`. Footnote definition lines that the
+  model sometimes writes (`[^ref]: url`) are dropped.
+- **Web search** is on unless `KAGI_SEARCH_DEFAULT=offline`, a `:offline` model suffix,
+  or `"search": false` on `/v1/ask`.
 
-- **Web search:** append `:online` or `:offline` to a model id (`some-model:offline`) to
-  turn Kagi's web search on or off. With no suffix, `KAGI_SEARCH_DEFAULT` applies.
-- **Reasoning effort:** `reasoning_effort` in the request, an effort suffix such as
-  `glm-5-3-flash:low`, or `KAGI_REASONING_EFFORT`. See
-  [Reasoning effort](#reasoning-effort).
-- **Citations:** Kagi's `[^ref]` markers are renumbered `[^1]`, `[^2]`, … in order of
-  first citation.
-- **Ignored inputs:** `tools`, `tool_choice`, `n`, `stop`, `seed`, `top_p`,
-  `response_format`, penalties, and `user` are ignored. `temperature` is validated but not
-  forwarded, because Kagi has no per-request temperature. Images become `[image omitted]`.
-- **Concurrency:** one Kagi turn at a time by default. Extra requests wait up to
-  `KAGI_QUEUE_WAIT_SECONDS`, then get 429. Turns are never retried automatically.
-- **End of answer:** the response ends at Kagi's `turn.completed`; anything Kagi sends
-  after it is not part of the answer.
-- **Disconnects:** if the client hangs up (streaming or not), or after the answer ends,
-  the proxy keeps reading the Kagi turn in the background (bounded, 600s) before deleting
-  the thread and freeing the slot.
-
-### Reasoning effort
-
-Kagi's v2 conversation API takes a `reasoning_effort` field: `none`, `minimal`, `low`,
-`medium`, `high`, `xhigh`, or `max`. Each model supports a subset. This field and its
-values were verified against live Kagi. It is a real cost and latency lever: with no
-effort set, a GLM model defaulted to `max` and spent 4,109 output tokens and 88s on an
-ordinary question. (`thinking_preset` was the legacy v1 field; it does not apply to v2
-and the proxy never sends it.)
-
-The proxy picks one effort per request, first match wins:
-
-1. `reasoning_effort` in the Chat Completions request body (OpenAI's field name);
-2. an effort suffix on the model id;
-3. `KAGI_REASONING_EFFORT`;
-4. nothing: the field is omitted and Kagi uses the model's own default.
-
-**Model id grammar.** Suffixes are a client-side convention; `/v1/models` lists plain ids.
+### Model ids and reasoning effort
 
 ```
 requested = model-id *( ":" suffix )
@@ -78,348 +50,197 @@ suffix    = "online" / "offline" / effort
 effort    = "none" / "minimal" / "low" / "medium" / "high" / "xhigh" / "max"
 ```
 
-Suffixes form a set: any order, repeats allowed. So `glm-5-3-flash:low:offline` and
-`glm-5-3-flash:offline:low` are the same. These are 400 `invalid_model_suffix`: an
-unknown or uppercase token, `:online` together with `:offline`, and two different
-efforts. The model id is everything before the first `:`, so a Kagi id must not
-contain `:`.
+Suffixes form a set (any order, repeats allowed): `glm-5-3-flash:low:offline`.
+`:online` with `:offline`, two different efforts, or an unknown token is 400
+`invalid_model_suffix`. `/v1/models` lists plain ids.
 
-**Validation.** Every value must be in the set above (400 `invalid_reasoning_effort`).
-Kagi's `/api/init` catalog also lists each model's options, in
-`parameters.reasoning_effort = {"options": [...], "default": ...}` (verified live). For
-example GLM has low/high/max with default max, an Opus-class model low…max with default
-high, and Haiku none…max with default low. The default can be `null`, and some models
-(`ki_quick`, `mistral-large`) have `parameters.reasoning_effort: null`, meaning no list.
-`GET /v1/models` shows them as non-standard `reasoning_efforts` and
-`reasoning_effort_default` fields per model, each omitted when there's nothing to show.
-When the catalog lists a model's options, a request or suffix effort outside them is a
-400 `unsupported_reasoning_effort` that names the supported values, and nothing reaches
-Kagi. This check is the only guard: Kagi itself silently accepts efforts outside a
-model's list (verified: `glm-5-3-flash` with `medium` returned 200). An unsupported `KAGI_REASONING_EFFORT` default is not an error: for that model the
-proxy omits the field (Kagi's default) and logs it once. If the catalog is unavailable,
-is being served stale after a failed refresh, doesn't list the model, or has no option
-list for it, only the global set is checked; Kagi then rejects anything else
-(`kagi_rejected_request`).
+Effort precedence: the request's `reasoning_effort`, then the suffix, then
+`KAGI_REASONING_EFFORT`, then the model's own default (Kagi's; GLM defaults to `max`,
+which is slow and expensive). An effort outside the model's `reasoning_efforts` is 400
+`unsupported_reasoning_effort` before any Kagi call; Kagi itself would silently accept
+it. An unsupported `KAGI_REASONING_EFFORT` is skipped for that model (logged once).
 
-Thinking output stays dropped: only text nodes reach the answer. Passing reasoning
-through (e.g. as `reasoning_content`) is a possible future option.
+## /v1/ask
 
-### Kagi threads
-
-Every request creates one Kagi thread. `KAGI_THREAD_LIFECYCLE` decides what happens to
-it. The wire facts below were verified against live Kagi:
-
-| Mode | Creation `POST /api/v2/conversations` | After the turn | In Kagi's UI |
-| --- | --- | --- | --- |
-| `delete` | no `is_saved` | `DELETE /api/conversations/{uuid}` | moved to the **trash**, see below |
-| `temporary` (default) | `"is_saved": false` | nothing | in the sidebar with a *Temporary* badge; Kagi expires it after your account's temporary window |
-| `keep` | no `is_saved` | nothing | whatever your account's `thread_saving_mode` says |
-
-- **`delete` is a soft delete.** Kagi's `DELETE /api/conversations/{uuid}` puts the
-  thread in the trash, where it can be restored (`POST .../restore`). It is not gone
-  until Kagi empties the trash (there is also `DELETE .../permanent` and
-  `/api/conversations/deleted/purge`, which the proxy does not use).
-- **`temporary`** is the UI's "Temporary" state (`is_saved: false`, no folder). The
-  expiry window is your account's `temporary_duration` setting (`24h`, `7d` or
-  `30d`).
-- **`keep`** omits `is_saved`, so Kagi applies your account's `thread_saving_mode`
-  (temporary or forever).
-- The proxy never changes account settings. In Kagi's UI, the Mark temporary/permanent
-  toggle is `PATCH /api/conversations/{uuid}` with `{"is_saved": true|false}`. It also
-  takes `folder_uuid`, `title`, `is_pinned` and `is_shared`. The proxy doesn't use it.
-- Every successful response carries `X-Kagi-Thread: <conversation-uuid>`, streaming or
-  not, because the thread exists before the body starts. Use it to find the thread in
-  Kagi (under `delete` it will be in the trash).
-
-### Disconnects
-
-The Python version answered a non-streaming request whose client had already gone with
-status 499. That was an artefact of its ASGI server. In Go the handler watches
-`r.Context().Done()`: when the client disconnects it marks the turn's consumer as gone
-(which starts the bounded drain) and returns **without writing a status**, because the
-connection is closed and any write would fail. Nothing reaches a client either way.
-
-A request still waiting for the turn slot gives up as soon as its client disconnects, so
-it never starts a Kagi turn nobody will read. (The Python version would still run it.)
-
-## Build
-
-Requires Go ≥ 1.27. Standard library only; there are no module dependencies.
-
-```sh
-cd kagi-openai-proxy-go
-go build -o kagi-openai-proxy ./cmd/kagi-openai-proxy
-
-# For a Mac (Apple silicon) from any OS:
-GOOS=darwin GOARCH=arm64 go build -o kagi-openai-proxy ./cmd/kagi-openai-proxy
-# Intel Mac: GOARCH=amd64
+```json
+POST /v1/ask
+{"query": "How many people live in Lyon?", "model": "glm-5-3-flash:low",
+ "search": true, "reasoning_effort": "low", "branch": "<from an earlier thread event>"}
 ```
 
-The result is one self-contained binary.
+Only `query` is required. `model` defaults to Kagi's default model. Unknown fields are
+400. Without `branch` the proxy starts a new Kagi thread; with it, the question is a
+follow-up in that thread and Kagi keeps the earlier turns and search results as
+context. The query is sent as-is. Threads are never deleted (under
+`KAGI_THREAD_LIFECYCLE=delete` they are created as Temporary instead).
 
-## Setup
+The response is Server-Sent Events, each frame `event: <name>` plus `data: <json>`,
+and `: keepalive` comments while Kagi is quiet:
 
-1. **Get your Kagi session token.** In Kagi, open *Settings → Account → Session Link*.
-   The link looks like `https://kagi.com/search?token=XXXXXXXX…`; the token is the value
-   after `token=`. Anyone holding it is logged in as you, so treat it like a password.
-   Resetting the session link in Kagi revokes it.
+| Event | Data | Notes |
+| --- | --- | --- |
+| `thread` | `{conversation, branch, turn, url}` | Always first. Send `branch` back for a follow-up. `url` opens the thread in Kagi |
+| `title` | `{title}` | Kagi's title for the thread |
+| `activity` | `{id, type, text, status}` | Upsert by `id`. `type` is `search` (`text` = the query), `thinking` (`text` = the summary), or another tool name. `status`: `running`, `completed`, `failed`, `cancelled` |
+| `source` | `{n, url, title, snippet, favicon?, published_at?}` | `n` matches the `[[n]](url)` links in the text |
+| `text` | `{delta}` | Answer Markdown |
+| `done` | `{model, model_version?, input_tokens, output_tokens, cost_usd?}` | Success, always last |
+| `error` | `{type, code, message}` | Failure after the stream started, always last |
 
-2. **Configure.** Put the variables in your shell or in a `.env` file (git-ignored),
-   then load it with `set -a; . ./.env; set +a`:
+Errors before the stream starts are HTTP errors with the body shape in [Errors](#errors).
 
-   ```sh
-   KAGI_SESSION_TOKEN=your-session-link-token
-   PROXY_API_KEY=$(openssl rand -base64 32)
-   ```
+## /v1/chat/completions
 
-3. **Run:**
+Every request becomes one new Kagi thread. The OpenAI message list is flattened into
+one prompt (system instructions plus a `User:` / `Assistant:` transcript). If the prompt
+exceeds about 70% of the model's context window, the oldest messages are replaced by
+`[...earlier messages omitted...]`. Long chats resend their history each turn.
 
-   ```sh
-   ./kagi-openai-proxy            # binds PROXY_HOST:PROXY_PORT (127.0.0.1:8000)
-   ```
+- Images become `[image omitted]`. `tools`, `tool_choice`, `n`, `stop`, `seed`,
+  `top_p`, `response_format`, penalties, and `user` are ignored. `temperature` is
+  validated but not forwarded.
+- Thinking and search steps are not part of the answer.
+- Non-streaming responses carry OpenAI `message.annotations` of type `url_citation`,
+  one per citation link, with `start_index` / `end_index` in characters (code points).
+- `stream_options.include_usage` adds the usage chunk.
+- The answer ends at Kagi's `turn.completed`. A failure after the stream started
+  arrives as a final `data: {"error": {...}}` frame with no `[DONE]`.
 
-   The process starts without contacting Kagi. A bad token only shows up on the first
-   request, as a 401 `kagi_session_expired`. To check the token up front:
+## Kagi threads
 
-   ```sh
-   curl -s -H "Authorization: Bearer $PROXY_API_KEY" 'http://127.0.0.1:8000/health?deep=1'
-   curl -s -H "Authorization: Bearer $PROXY_API_KEY" http://127.0.0.1:8000/v1/models
-   ```
+`KAGI_THREAD_LIFECYCLE` decides what happens to each thread a chat request creates:
 
-   SIGINT/SIGTERM shut it down gracefully. Open responses get 10s to finish. In-flight
-   turns get 10s more to drain, then they are cancelled; each cancelled turn still
-   tries to delete its thread. To run it permanently, see [Deployment](#deployment).
+| Mode | Created with | After the turn | In Kagi |
+| --- | --- | --- | --- |
+| `temporary` (default) | `"is_saved": false` | nothing | Sidebar with a *Temporary* badge; Kagi deletes it after the account's *Temporary Duration* (24h, 7d or 30d) |
+| `delete` | account default | `DELETE` | Moved to Kagi's trash (restorable), not purged |
+| `keep` | account default | nothing | Whatever the account's thread saving mode says |
 
-4. **Try it:**
+The proxy never changes account settings. Kagi applies the account's custom
+instructions to every turn; `KAGI_PERSONALIZATION` only controls personalized search
+results.
 
-   ```sh
-   curl -sN http://127.0.0.1:8000/v1/chat/completions \
-     -H "Authorization: Bearer $PROXY_API_KEY" -H 'Content-Type: application/json' \
-     -d '{"model": "<id from /v1/models>", "stream": true,
-          "messages": [{"role": "user", "content": "Hello"}]}'
-   ```
-
-### Configuration
+## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `KAGI_SESSION_TOKEN` | *(required)* | Kagi session-link token, sent as the `kagi_session` cookie |
-| `PROXY_API_KEY` | *(required, ≥ 16 chars)* | Clients must send `Authorization: Bearer <PROXY_API_KEY>` |
-| `PROXY_HOST` | `127.0.0.1` | Bind address. Keep it loopback unless you deploy on a tailnet (see [Deployment](#deployment)) |
-| `PROXY_PORT` | `8000` | Bind port |
-| `PROXY_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Comma-separated `Host` header values to accept (DNS-rebinding defence). Ports and whitespace are stripped before matching; matching is exact. Setting it **replaces** the default. Empty/unset = localhost only |
+| `KAGI_SESSION_TOKEN` | *(required)* | Kagi *Settings → Account → Session Link*: the value after `token=`, without any `&q=%s`. Anyone holding it is logged in as you; resetting the session link revokes it |
+| `PROXY_API_KEY` | *(required, ≥ 16 chars)* | Bearer key clients must send, e.g. `openssl rand -hex 32` |
+| `PROXY_HOST` / `PROXY_PORT` | `127.0.0.1` / `8000` | Bind address |
+| `PROXY_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Accepted `Host` header values, comma-separated, ports ignored (DNS-rebinding defence). Setting it replaces the default |
 | `KAGI_BASE_URL` | `https://assistant.kagi.com` | Kagi Assistant origin |
-| `KAGI_THREAD_LIFECYCLE` | `temporary` | What happens to each Kagi thread: `temporary` (created with `is_saved: false`, never deleted, auto-expires per your account), `delete` (DELETE after the turn, which moves it to Kagi's trash), or `keep` (account default, never deleted). See [Kagi threads](#kagi-threads) |
-| `KAGI_PERSONALIZATION` | `false` | Pass Kagi's `personalization` flag |
-| `KAGI_SEARCH_DEFAULT` | `online` | Web search for model ids without a suffix (`online`/`offline`) |
-| `KAGI_REASONING_EFFORT` | *(unset)* | Default `reasoning_effort` when neither the request nor a model suffix sets one: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Validated at startup. Unset = Kagi's per-model default. Skipped (logged once) for a model whose catalog options don't include it |
-| `KAGI_MAX_CONCURRENCY` | `1` | Max concurrent Kagi turns |
-| `KAGI_QUEUE_WAIT_SECONDS` | `30` | How long a request waits for a free slot before 429 |
+| `KAGI_THREAD_LIFECYCLE` | `temporary` | `temporary`, `delete` or `keep`, see [Kagi threads](#kagi-threads) |
+| `KAGI_PERSONALIZATION` | `false` | Kagi's personalized search results |
+| `KAGI_SEARCH_DEFAULT` | `online` | Web search for model ids without `:online` / `:offline` |
+| `KAGI_REASONING_EFFORT` | *(unset)* | Default effort; unset = the model's own default |
+| `KAGI_MAX_CONCURRENCY` | `1` | Concurrent Kagi turns |
+| `KAGI_QUEUE_WAIT_SECONDS` | `30` | Wait for a free slot before 429 |
 | `KAGI_CONNECT_TIMEOUT` | `20` | Upstream connect timeout (seconds) |
-| `KAGI_READ_TIMEOUT` | `120` | Upstream time-to-headers and per-read timeout (seconds); there is no total timeout |
+| `KAGI_READ_TIMEOUT` | `120` | Upstream time-to-headers and per-read idle timeout (seconds); there is no total timeout |
 | `KAGI_MODELS_TTL` | `21600` | Model catalog cache lifetime (seconds) |
 
-The binary also has a `-healthcheck` flag: instead of serving, it sends `GET /health`
-to `PROXY_HOST:PROXY_PORT` (a `0.0.0.0`/`::` bind is reached through loopback), using
-the first `PROXY_ALLOWED_HOSTS` entry as the `Host` header so the allow-list accepts it.
-It exits 0 if the answer is `200 {"status":"ok"}`, else 1. It never calls Kagi. It
-exists for container `HEALTHCHECK`s on images without curl.
+The process starts without contacting Kagi; a bad token shows up on the first request
+as 401 `kagi_session_expired`, or on `GET /health?deep=1`.
 
-Logs go to stderr in the format `2026-10-15 07:02:56,423 INFO kagi_proxy: ...`. The Go
-binary writes no per-request access log; under the Python version, uvicorn wrote those.
+## Run
 
-## Deployment
-
-Pick one. In every case the proxy is reachable only from places you choose: your own
-machine, or your private tailnet.
-
-### Bare binary
-
-Run the binary as yourself. It binds `127.0.0.1:8000` by default, so only local apps
-such as Raycast can reach it.
-
-**macOS, launchd (optional).** Copy the binary to e.g. `~/bin/kagi-openai-proxy`, then
-create `~/Library/LaunchAgents/com.example.kagi-openai-proxy.plist`. The plist holds
-your session token, so `chmod 600` it.
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.example.kagi-openai-proxy</string>
-  <key>ProgramArguments</key><array><string>/Users/YOU/bin/kagi-openai-proxy</string></array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>KAGI_SESSION_TOKEN</key><string>your-session-link-token</string>
-    <key>PROXY_API_KEY</key><string>your-proxy-key-at-least-16-chars</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/kagi-openai-proxy.log</string>
-</dict>
-</plist>
-```
+Requires Go ≥ 1.27.
 
 ```sh
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.kagi-openai-proxy.plist
-launchctl kickstart -k gui/$(id -u)/com.example.kagi-openai-proxy   # restart after changes
+go build -o kagi-openai-proxy ./cmd/kagi-openai-proxy
+GOOS=darwin GOARCH=arm64 go build -o kagi-openai-proxy ./cmd/kagi-openai-proxy   # for a Mac
+KAGI_SESSION_TOKEN=... PROXY_API_KEY=... ./kagi-openai-proxy
 ```
 
-**Linux, systemd user service (optional).** Put the variables in
-`~/.config/kagi-openai-proxy.env` (`chmod 600`) and create
-`~/.config/systemd/user/kagi-openai-proxy.service`:
+SIGINT/SIGTERM shut it down gracefully: open responses get 10 s, and in-flight turns
+get 10 s more before the proxy stops reading them.
 
-```ini
-[Unit]
-Description=kagi-openai-proxy
+**Docker:** the image is `FROM scratch` (binary plus CA bundle), runs as `65534:65534`,
+listens on `0.0.0.0:8000` inside the container, and has a `HEALTHCHECK` through the
+binary's `-healthcheck` flag (it calls `/health` with the first allowed host; no Kagi
+call). [docker-compose.yml](docker-compose.yml) publishes the port on a Tailscale IP
+only. Behind a reverse proxy on a private network, do not publish a port at all and
+set `PROXY_ALLOWED_HOSTS` to the proxy's host name.
 
-[Service]
-EnvironmentFile=%h/.config/kagi-openai-proxy.env
-ExecStart=%h/bin/kagi-openai-proxy
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-```sh
-systemctl --user daemon-reload && systemctl --user enable --now kagi-openai-proxy
-```
-
-### Docker + Tailscale
-
-Use this to run the proxy on one machine, such as a home server, and reach it from your
-other devices over your tailnet. The image is `FROM scratch` (binary + CA bundle, about
-3.5 MB), runs as `65534:65534` (nobody), and has a `HEALTHCHECK` using `-healthcheck`.
-Inside the container it listens on `0.0.0.0:8000`. You limit exposure in two places.
-
-1. **Publish on the Tailscale IP only.** In
-   [docker-compose.yml](docker-compose.yml), replace `100.101.102.103` with your
-   machine's Tailscale IP (`tailscale ip -4`). Never publish with plain `-p 8000:8000`
-   or `"8000:8000"`: that binds `0.0.0.0` on the host, every interface including your
-   LAN.
-2. **Allow your tailnet name/IP as Host.** Create `.env` next to the compose file. It
-   is git- and docker-ignored, so keep it that way, and `chmod 600` it:
-
-   ```sh
-   KAGI_SESSION_TOKEN=your-session-link-token
-   PROXY_API_KEY=your-proxy-key-at-least-16-chars
-   PROXY_ALLOWED_HOSTS=100.101.102.103,yourhost.your-tailnet.ts.net
-   ```
-
-```sh
-docker compose up -d --build
-docker compose ps        # STATUS shows (healthy) once /health answers
-```
-
-From another device on the tailnet, use `http://100.101.102.103:8000/v1` (or your
-MagicDNS name) as the `base_url`, for example in Raycast's `providers.yaml`.
-
-> [!CAUTION]
-> **Never use Tailscale Funnel** (or Serve with Funnel, port forwarding, a public reverse
-> proxy, or a cloud tunnel) for this. Funnel publishes the service to the whole
-> internet, and this proxy is your logged-in Kagi session. Keep it on your private
-> tailnet only.
-
-Plain HTTP is fine here. Tailscale traffic between your devices is already encrypted
-end-to-end by WireGuard, so the bearer key never crosses a network in the clear. Don't
-reuse the same setup over a LAN without Tailscale.
+Logs go to stderr and record token counts and `cost_usd` per turn, never prompts. The
+session token and proxy key are redacted from every log line, error, and probe output.
 
 ## Raycast
 
-Raycast's [Custom Providers](https://manual.raycast.com/ai/custom-providers) feature
-reads `~/.config/raycast/ai/providers.yaml`. Enable it under *Settings → AI → Models &
-Providers → Custom Providers*. Then copy the entry from
-[providers.yaml.example](providers.yaml.example), replacing:
-
-- the API key with your `PROXY_API_KEY`, not the Kagi token;
-- the model ids with ids from `GET /v1/models`, plus suffixed variants if you want
-  them: `:offline`, an effort such as `:low`, or both (`glm-5-3-flash:low:offline`).
-  Raycast does not read `/v1/models` itself, so the ids must match exactly.
-
-If you enable Raycast's `reasoning_effort` ability for a model, every value Raycast
-sends must be in that model's `reasoning_efforts` list from `/v1/models`, or the proxy
-answers 400. A request-body effort overrides the model's suffix.
-
-Leave `tools` and `vision` unsupported and do not add a top-level `tools:` block. The
-proxy ignores tools and replaces images with a placeholder.
+Raycast's [Custom Providers](https://manual.raycast.com/ai/custom-providers) read
+`~/.config/raycast/ai/providers.yaml`; enable them under *Settings → AI → Models &
+Providers*. Copy the entry from [providers.yaml.example](providers.yaml.example), with
+your `PROXY_API_KEY` (not the Kagi token) and exact ids from `/v1/models`, plus
+suffixed variants if you want them. Leave `tools` and `vision` unsupported. If you
+enable the `reasoning_effort` ability, every value Raycast sends must be in that
+model's `reasoning_efforts`.
 
 ## Errors
 
-All errors use the OpenAI shape `{"error": {"message", "type", "param", "code"}}`.
+All HTTP errors use the OpenAI shape `{"error": {"message", "type", "param", "code"}}`.
 
 | Situation | HTTP | `type` / `code` |
 | --- | --- | --- |
 | Missing or wrong proxy key | 401 | `invalid_request_error` / `invalid_api_key` |
-| Host header not in `PROXY_ALLOWED_HOSTS` (default `127.0.0.1` / `localhost`) | 400 | plain text `Invalid host header` |
+| Host header not allowed | 400 | plain text `Invalid host header` |
+| Bad request body or field | 400 | `invalid_request_error` / `invalid_request` |
+| Unknown or conflicting model suffix | 400 | `invalid_request_error` / `invalid_model_suffix` |
+| Effort not in the global set / not supported by the model | 400 | `invalid_request_error` / `invalid_reasoning_effort` / `unsupported_reasoning_effort` |
+| Kagi rejected the request (e.g. unknown model or branch) | 400 | `invalid_request_error` / `kagi_rejected_request` |
 | Kagi 401/403, redirect, or HTML instead of JSON | 401 | `authentication_error` / `kagi_session_expired` |
 | Kagi 429 or a quota-like turn failure | 429 | `rate_limit_error` |
 | Proxy busy longer than `KAGI_QUEUE_WAIT_SECONDS` | 429 | `rate_limit_error` / `proxy_busy` |
-| Kagi rejected the request (e.g. unknown model) | 400 | `invalid_request_error` / `kagi_rejected_request` |
-| Unknown or conflicting model suffix | 400 | `invalid_request_error` / `invalid_model_suffix` |
-| `reasoning_effort` not in the global set | 400 | `invalid_request_error` / `invalid_reasoning_effort` |
-| Effort not in the model's catalog options | 400 | `invalid_request_error` / `unsupported_reasoning_effort` |
-| Unexpected Kagi response shape, or a malformed stream frame | 502 | `api_error` / `kagi_protocol_drift` |
+| Unexpected Kagi response shape or malformed stream frame | 502 | `api_error` / `kagi_protocol_drift` |
 | Turn finished with no answer text | 502 | `api_error` / `kagi_empty_answer` |
+| Kagi cancelled the turn | 502 | `api_error` / `kagi_turn_cancelled` |
 
-Once a stream has started, failures (`turn.failed`, malformed frames, truncated streams,
-empty answers) arrive as a final `data: {"error": {...}}` frame, with no `data: [DONE]`
-after it.
-
-## Tests
+## Tests and the live probe
 
 ```sh
 go vet ./...
 go test -race ./...
 ```
 
-The suite runs offline. Kagi is simulated by `internal/kagitest`, an `httptest` server
-on 127.0.0.1 that records call order. Every test points the client at that fake. The
-realistic fixture stream (`internal/kagitest/testdata/realistic_turn.sse`) is
-byte-identical to the Python one; `.gitattributes` keeps its CRLF lines intact.
+The suite runs offline against `internal/kagitest`, an `httptest` fake of Kagi that
+records call order. Its fixtures follow live event shapes.
 
-`cmd/probe` is a **manual** live check against the real Kagi API. It spends one small
-turn, verifies the SSE event sequence the proxy relies on, then deletes the thread. Run
-it by hand when the proxy starts misbehaving. Never schedule or automate it:
+`cmd/probe` is a **manual** live check. It spends three cheap turns in one thread (a new
+thread, a follow-up, and a cancelled long answer), checks the event sequences the proxy
+relies on, then deletes the thread. Run it by hand when the proxy misbehaves; never
+schedule it:
 
 ```sh
 KAGI_SESSION_TOKEN=... go run ./cmd/probe [-model MODEL_ID]
 ```
 
-## License
-
-[MIT](LICENSE).
-
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `cmd/kagi-openai-proxy` | Server binary: config, HTTP server, graceful shutdown, `-healthcheck` |
-| `cmd/probe` | Manual live probe |
+| `cmd/kagi-openai-proxy` | Server binary, graceful shutdown, `-healthcheck` |
+| `cmd/probe`, `internal/probe` | Manual live probe |
 | `internal/kagi` | The only code that knows Kagi URLs, headers and JSON; produces internal events |
 | `internal/events` | Internal turn events |
-| `internal/sse` | Line-based SSE reader (`bufio.Reader`, 16 MiB per-frame cap) |
-| `internal/citations` | `[^ref]` → `[^n]` streaming rewrite |
-| `internal/translate` | OpenAI request parsing, flattening, answer assembly, chunk formatting, redacted errors |
-| `internal/server` | HTTP surface, catalog cache, turn slot, per-turn runner goroutine |
-| `internal/redact`, `internal/logx` | Secret redaction choke point; redacting logger |
+| `internal/sse` | Line-based SSE reader (16 MiB per-frame cap) |
+| `internal/citations` | Source numbering and streaming `[^ref]` → `[[n]](url)` rewrite |
+| `internal/translate` | OpenAI request parsing, flattening, answer assembly, chunk formatting |
+| `internal/server` | HTTP surface, `/v1/ask`, catalog cache, turn slot, per-turn runner |
+| `internal/redact`, `internal/logx` | Secret redaction and the redacting logger |
 | `internal/kagitest` | Offline fake Kagi for tests |
 
-## Risks and terms
+## Risks
 
 - **Personal use only.** This automates your own Kagi account through an undocumented
-  interface. Kagi has not sanctioned it, and it may conflict with Kagi's terms of
-  service. Using it is your own decision and your own risk, including to your account.
-- **It will break.** The wire protocol was reverse-engineered and can change without
-  notice. The proxy fails loudly (`kagi_protocol_drift`, `kagi_empty_answer`) instead of
-  returning silently wrong output. `cmd/probe` shows what changed.
-- **Keep usage human-scale.** One turn at a time by default and no automatic retries.
-  Don't script bulk traffic through it, share it, or raise concurrency far.
-- **Never expose it to the internet.** The proxy is effectively your logged-in Kagi
-  session. By default it binds `127.0.0.1`, rejects other `Host` headers, requires a
-  bearer key, and sends no CORS headers. The only remote setup this README supports is
-  a private tailnet ([Deployment](#deployment)). No Tailscale Funnel, public reverse
-  proxy, port forward, or `0.0.0.0` publish on a LAN.
-- **Secrets:** the session token and proxy key are redacted from logs, error messages,
-  and probe output. Logs record token counts and `cost_usd` per turn, never the prompt.
+  interface that Kagi has not sanctioned; it may conflict with Kagi's terms. Using it
+  is your decision and your risk.
+- **It will break** when Kagi changes its wire protocol. The proxy fails loudly
+  (`kagi_protocol_drift`, `kagi_empty_answer`) instead of returning wrong output; the
+  probe shows what changed.
+- **Keep usage human-scale.** Kagi meters Assistant use per account. Don't script bulk
+  traffic, share the proxy, or raise concurrency far.
+- **Never expose it to the internet.** It is your logged-in Kagi session. No Tailscale
+  Funnel, public reverse proxy, port forward, or `0.0.0.0` publish on a LAN.
+
+## License
+
+[MIT](LICENSE).

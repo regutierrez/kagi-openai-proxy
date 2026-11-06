@@ -16,7 +16,7 @@
 #   model's reasoning_efforts list; otherwise the proxy answers 400. Without it, use a
 #   suffix or KAGI_REASONING_EFFORT.
 # - Do not add a top-level `tools:` block and keep tools/vision unsupported: the proxy
-#   ignores tools and replaces images with "[image omitted]" in v0.1.
+#   ignores tools and replaces images with "[image omitted]".
 
 providers:
   - id: kagi

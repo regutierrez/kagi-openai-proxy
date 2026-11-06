@@ -76,7 +76,7 @@ func jsonType(v any) string {
 
 func isIntLiteral(n json.Number) bool { return !strings.ContainsAny(n.String(), ".eE") }
 
-// Truthy is Python truthiness for JSON values.
+// Truthy reports whether a JSON value is non-empty: not null, false, 0, "", [] or {}.
 func Truthy(v any) bool {
 	switch x := v.(type) {
 	case nil:
