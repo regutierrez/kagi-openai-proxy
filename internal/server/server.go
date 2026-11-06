@@ -514,6 +514,7 @@ func (p *Proxy) startTurn(content, modelID string, opts kagi.TurnOptions) (*turn
 		cancelUpstream:   cancelTurn,
 		deleteCtx:        cleanupCtx,
 		conversationUUID: created.ConversationUUID,
+		turnUUID:         created.AssistantTurnUUID,
 		model:            modelID,
 		deleteThread:     settings.ThreadLifecycle.DeletesThreads(),
 		drainTimeout:     settings.DrainTimeout,

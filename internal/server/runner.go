@@ -94,6 +94,7 @@ type turnRunner struct {
 	cancelUpstream   context.CancelFunc
 	deleteCtx        context.Context
 	conversationUUID string
+	turnUUID         string
 	model            string
 	deleteThread     bool
 	drainTimeout     time.Duration
@@ -118,8 +119,15 @@ func (r *turnRunner) consumerGone() {
 	r.consumerPresent = false
 	r.queue.close()
 	if r.reading && !r.turnCompleted {
-		// Normal completions end the response at turn.completed; only log early departures.
-		logx.Info("conversation %s: response ended before the Kagi turn did; draining upstream in background (max %.0fs)", r.conversationUUID, r.drainTimeout.Seconds())
+		// The client left mid-answer: stop the turn so Kagi stops spending tokens and the
+		// stream ends quickly (verified live: within a fraction of a second). The bounded
+		// drain below still applies if Kagi keeps streaming anyway.
+		logx.Info("conversation %s: client left before the Kagi turn ended; cancelling it (drain max %.0fs)", r.conversationUUID, r.drainTimeout.Seconds())
+		go func() {
+			if err := r.kagi.CancelTurn(r.deleteCtx, r.turnUUID); err != nil {
+				logx.Warn("conversation %s: failed to cancel Kagi turn: %v", r.conversationUUID, err)
+			}
+		}()
 	}
 	if r.reading {
 		r.drainTimer = time.AfterFunc(r.drainTimeout, func() {
@@ -178,6 +186,13 @@ func (r *turnRunner) read() *translate.TurnError {
 				r.turnCompleted = true
 				r.mu.Unlock()
 				r.logUsage(done.Usage)
+			}
+			// Kagi ended the turn itself (failed or cancelled): nothing left to cancel.
+			// Protocol drift is the proxy's own verdict; the turn may still be running.
+			if failed, ok := ev.(events.TurnFailed); ok && failed.Code != kagi.ProtocolDriftCode {
+				r.mu.Lock()
+				r.turnCompleted = true
+				r.mu.Unlock()
 			}
 			r.queue.push(ev)
 			if _, final := ev.(events.Final); final {

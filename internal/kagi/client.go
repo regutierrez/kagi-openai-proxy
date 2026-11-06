@@ -59,9 +59,11 @@ func newError(kind Kind, message string) *Error {
 	return &Error{Kind: kind, Message: redact.String(message)}
 }
 
-// CreatedTurn identifies the thread and the assistant turn of a new conversation.
+// CreatedTurn identifies the thread, its branch, and the new assistant turn.
 type CreatedTurn struct {
-	ConversationUUID  string
+	ConversationUUID string
+	// BranchUUID continues the thread (Respond); "" if Kagi did not return one.
+	BranchUUID        string
 	AssistantTurnUUID string
 }
 
@@ -307,6 +309,7 @@ type createBody struct {
 	Personalization bool   `json:"personalization"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"` // omitted = Kagi's per-model default
 	IsSaved         *bool  `json:"is_saved,omitempty"`         // false = "Temporary"; omitted = account default
+	Operation       string `json:"operation,omitempty"`        // "new_turn" for a follow-up
 }
 
 // TurnOptions are the per-turn knobs of POST /api/v2/conversations.
@@ -321,9 +324,22 @@ type TurnOptions struct {
 
 // CreateTurn is POST /api/v2/conversations: create a thread and submit the prompt.
 func (c *Client) CreateTurn(ctx context.Context, content, model string, opts TurnOptions) (CreatedTurn, error) {
-	const what = "POST /api/v2/conversations"
-	body := createBody{content, model, opts.EnableSearch, opts.Personalization, opts.ReasoningEffort, opts.IsSaved}
-	resp, err := c.send(ctx, http.MethodPost, "/api/v2/conversations", body, "application/json")
+	body := createBody{content, model, opts.EnableSearch, opts.Personalization, opts.ReasoningEffort, opts.IsSaved, ""}
+	return c.startTurn(ctx, "/api/v2/conversations", body)
+}
+
+// Respond is POST /api/v2/branches/{uuid}/respond: a follow-up turn in an existing
+// thread (verified live: same body as CreateTurn plus "operation": "new_turn"). Kagi
+// keeps the thread's earlier turns and search results as context. opts.IsSaved is
+// ignored: the thread already exists.
+func (c *Client) Respond(ctx context.Context, branchUUID, content, model string, opts TurnOptions) (CreatedTurn, error) {
+	body := createBody{content, model, opts.EnableSearch, opts.Personalization, opts.ReasoningEffort, nil, "new_turn"}
+	return c.startTurn(ctx, "/api/v2/branches/"+url.PathEscape(branchUUID)+"/respond", body)
+}
+
+func (c *Client) startTurn(ctx context.Context, path string, body createBody) (CreatedTurn, error) {
+	what := "POST " + path
+	resp, err := c.send(ctx, http.MethodPost, path, body, "application/json")
 	if err != nil {
 		return CreatedTurn{}, err
 	}
@@ -332,18 +348,28 @@ func (c *Client) CreateTurn(ctx context.Context, content, model string, opts Tur
 		return CreatedTurn{}, err
 	}
 	root, _ := asMap(obj)
-	conversation, _ := asMap(root["conversation"])
-	uuid, ok := nonEmptyString(conversation["uuid"])
+	uuid, ok := nonEmptyString(root["conversation_uuid"])
 	if !ok {
-		return CreatedTurn{}, newError(KindProtocol, "Kagi create-conversation response has no conversation.uuid")
+		conversation, _ := asMap(root["conversation"])
+		uuid, ok = nonEmptyString(conversation["uuid"])
 	}
+	if !ok {
+		return CreatedTurn{}, newError(KindProtocol, "Kagi "+what+" response has no conversation uuid")
+	}
+	branch, _ := root["branch_uuid"].(string)
 	turn, ok := nonEmptyString(root["assistant_turn_uuid"])
 	if !ok {
-		e := newError(KindProtocol, "Kagi create-conversation response has no assistant_turn_uuid")
+		e := newError(KindProtocol, "Kagi "+what+" response has no assistant_turn_uuid")
 		e.ConversationUUID = uuid
 		return CreatedTurn{}, e
 	}
-	return CreatedTurn{ConversationUUID: uuid, AssistantTurnUUID: turn}, nil
+	return CreatedTurn{ConversationUUID: uuid, BranchUUID: branch, AssistantTurnUUID: turn}, nil
+}
+
+// CancelTurn is POST /api/v2/turns/{uuid}/cancel. Verified live: 204, then the turn
+// stream ends within a fraction of a second with turn.cancelled and is_final.
+func (c *Client) CancelTurn(ctx context.Context, assistantTurnUUID string) error {
+	return c.expectOK(ctx, http.MethodPost, "/api/v2/turns/"+url.PathEscape(assistantTurnUUID)+"/cancel")
 }
 
 // OpenTurnStream starts GET /api/v2/turns/{uuid}/stream and verifies its status. The
@@ -372,9 +398,13 @@ func (c *Client) OpenTurnStream(ctx context.Context, assistantTurnUUID string) (
 
 // DeleteConversation is DELETE /api/conversations/{uuid}.
 func (c *Client) DeleteConversation(ctx context.Context, conversationUUID string) error {
-	path := "/api/conversations/" + url.PathEscape(conversationUUID)
-	what := "DELETE " + path
-	resp, err := c.send(ctx, http.MethodDelete, path, nil, "application/json")
+	return c.expectOK(ctx, http.MethodDelete, "/api/conversations/"+url.PathEscape(conversationUUID))
+}
+
+// expectOK sends a bodiless request and maps any non-2xx status to a Kagi error.
+func (c *Client) expectOK(ctx context.Context, method, path string) error {
+	what := method + " " + path
+	resp, err := c.send(ctx, method, path, nil, "application/json")
 	if err != nil {
 		return err
 	}

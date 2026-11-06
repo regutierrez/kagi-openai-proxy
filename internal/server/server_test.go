@@ -239,6 +239,21 @@ func TestTurnFailedMidStream(t *testing.T) {
 	}
 }
 
+func TestTurnFailedByKagiIsNotCancelled(t *testing.T) {
+	fake := kagitest.New()
+	// is_final comes late, so the response ends while the stream is still open.
+	fake.AddScript(kagitest.Script{Steps: []kagitest.Step{
+		kagitest.SSE(append(kagitest.Partial(), ev("turn.failed", nil, obj{"error_code": "model_unavailable"}))...),
+		200 * time.Millisecond, kagitest.SSE(obj{"is_final": true}),
+	}})
+	e := newEnv(t, fake)
+	e.post(chatBody(true, "kagi-default", nil))
+	e.waitIdle()
+	if fake.Has(kagitest.Cancel) || !fake.Has("stream:drained") {
+		t.Fatalf("calls %v", fake.Calls())
+	}
+}
+
 func TestTurnFailedNonStreamingQuotaIs429(t *testing.T) {
 	fake := kagitest.New()
 	fake.StreamBody = kagitest.SSE(ev("turn.started", nil, nil), ev("turn.failed", nil, obj{"error_code": "quota_exceeded"}), obj{"is_final": true})
@@ -309,24 +324,26 @@ func TestKeepaliveChunksWhileUpstreamIsQuiet(t *testing.T) {
 	}
 }
 
-func TestClientDisconnectDrainsUpstreamDeletesThreadReleasesSlot(t *testing.T) {
+func TestClientDisconnectCancelsTurnDeletesThreadReleasesSlot(t *testing.T) {
 	fake := kagitest.New()
 	gate := kagitest.NewGate()
-	fake.Gate, fake.PauseAfter = gate, 4 // upstream stalls early in the turn
+	fake.Gate, fake.PauseAfter = gate, 4 // upstream stalls early in the turn and never resumes
 	e := newEnv(t, fake, func(s *config.Settings) { s.Keepalive = 50 * time.Millisecond })
 	e.streamThenHangUp()
-	time.Sleep(200 * time.Millisecond) // let the server notice the hang-up
-	// The response is over, but the upstream is still mid-turn and holds the slot.
-	if fake.Has("stream:drained") || fake.Has(kagitest.Delete) || !e.proxy.Busy() {
-		t.Fatalf("calls %v busy=%v", fake.Calls(), e.proxy.Busy())
+	// The proxy cancels the Kagi turn; Kagi ends the stream; the thread is deleted and
+	// the slot freed, all without the stalled upstream ever resuming.
+	e.waitIdle()
+	calls := fake.Calls()
+	if fake.Has("stream:drained") || fake.Index(kagitest.Cancel) < 0 || fake.Index(kagitest.Cancel) > fake.Index("stream:cancelled") ||
+		fake.Index("stream:cancelled") > fake.Index(kagitest.Delete) || e.proxy.Busy() {
+		t.Fatalf("calls %v busy=%v", calls, e.proxy.Busy())
 	}
 	gate.Open()
-	e.waitIdle()
-	if fake.Index("stream:drained") < 0 || fake.Index("stream:drained") > fake.Index(kagitest.Delete) || e.proxy.Busy() {
-		t.Fatalf("calls %v", fake.Calls())
-	}
 	if r := e.post(chatBody(false, "kagi-default", nil)); r.status != 200 { // the proxy keeps working
 		t.Fatalf("follow-up %d", r.status)
+	}
+	if fake.Count(kagitest.Cancel) != 1 { // a completed turn is never cancelled
+		t.Fatalf("calls %v", fake.Calls())
 	}
 }
 
@@ -609,6 +626,7 @@ func TestNonStreamingDisconnectArmsBoundedDrain(t *testing.T) {
 func TestStreamingDisconnectWithNeverEndingUpstreamIsBounded(t *testing.T) {
 	logs := captureLogs(t)
 	fake := kagitest.New()
+	fake.IgnoreCancel = true // Kagi keeps streaming despite the cancel: the drain bound applies
 	fake.AddScript(kagitest.Script{Steps: []kagitest.Step{kagitest.SSE(kagitest.Partial()...)}, HeartbeatEvery: 10 * time.Millisecond})
 	e := newEnv(t, fake, withDrain(300*time.Millisecond))
 	e.streamThenHangUp()

@@ -34,6 +34,7 @@ const (
 	Create     = "POST /api/v2/conversations"
 	Stream     = "GET " + StreamPath
 	Delete     = "DELETE " + DeletePath
+	Cancel     = "POST /api/v2/turns/" + Turn + "/cancel"
 	Init       = "GET /api/init"
 )
 
@@ -149,8 +150,12 @@ type Fake struct {
 	Gate          *Gate // pause the default stream before chunk PauseAfter
 	PauseAfter    int
 	Delay         time.Duration
+	// IgnoreCancel makes POST .../cancel a no-op. By default a cancel ends the open turn
+	// stream with turn.cancelled and is_final, as Kagi does (verified live).
+	IgnoreCancel bool
 
 	mu       sync.Mutex
+	cancel   chan struct{} // closed by POST .../cancel; one per turn stream
 	calls    []string
 	requests map[string]*Recorded
 	scripts  []Script
@@ -246,6 +251,14 @@ func (f *Fake) handle(w http.ResponseWriter, r *http.Request) {
 		f.scripts = f.scripts[1:]
 		script = &s
 	}
+	if key == Stream {
+		f.cancel = make(chan struct{})
+	}
+	cancelled := f.cancel
+	if key == Cancel && !f.IgnoreCancel && f.cancel != nil {
+		close(f.cancel)
+		f.cancel = nil
+	}
 	f.mu.Unlock()
 
 	switch key {
@@ -271,10 +284,12 @@ func (f *Fake) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(200)
 		if script != nil {
-			f.serveScript(w, r, *script)
+			f.serveScript(w, r, *script, cancelled)
 		} else {
-			f.serveChunked(w, r)
+			f.serveChunked(w, r, cancelled)
 		}
+	case Cancel:
+		w.WriteHeader(http.StatusNoContent)
 	case Delete:
 		w.WriteHeader(http.StatusNoContent)
 	default:
@@ -290,7 +305,14 @@ func flush(w http.ResponseWriter) {
 	}
 }
 
-func (f *Fake) serveChunked(w http.ResponseWriter, r *http.Request) {
+// endCancelled writes the tail Kagi sends after a cancel (verified live).
+func (f *Fake) endCancelled(w http.ResponseWriter) {
+	f.record("stream:cancelled")
+	_, _ = w.Write(SSE(Ev("turn.cancelled", nil, map[string]any{"reason": "cancelled"}), map[string]any{"is_final": true, "error": "Cancelled"}))
+	flush(w)
+}
+
+func (f *Fake) serveChunked(w http.ResponseWriter, r *http.Request, cancelled <-chan struct{}) {
 	body := f.StreamBody
 	var chunks [][]byte
 	for i := 0; i < len(body); i += f.ChunkSize {
@@ -301,6 +323,9 @@ func (f *Fake) serveChunked(w http.ResponseWriter, r *http.Request) {
 			if f.Gate != nil {
 				select {
 				case <-f.Gate.ch:
+				case <-cancelled:
+					f.endCancelled(w)
+					return
 				case <-r.Context().Done():
 					return
 				}
@@ -319,7 +344,7 @@ func (f *Fake) serveChunked(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (f *Fake) serveScript(w http.ResponseWriter, r *http.Request, s Script) {
+func (f *Fake) serveScript(w http.ResponseWriter, r *http.Request, s Script, cancelled <-chan struct{}) {
 	last := -1
 	for i, step := range s.Steps {
 		if _, ok := step.([]byte); ok {
@@ -331,12 +356,18 @@ func (f *Fake) serveScript(w http.ResponseWriter, r *http.Request, s Script) {
 		case *Gate:
 			select {
 			case <-v.ch:
+			case <-cancelled:
+				f.endCancelled(w)
+				return
 			case <-r.Context().Done():
 				return
 			}
 		case time.Duration:
 			select {
 			case <-time.After(v):
+			case <-cancelled:
+				f.endCancelled(w)
+				return
 			case <-r.Context().Done():
 				return
 			}
@@ -359,6 +390,9 @@ func (f *Fake) serveScript(w http.ResponseWriter, r *http.Request, s Script) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-cancelled:
+			f.endCancelled(w)
 			return
 		case <-ticker.C:
 			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
