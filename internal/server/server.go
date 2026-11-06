@@ -630,7 +630,7 @@ func (p *Proxy) complete(w http.ResponseWriter, r *http.Request, runner *turnRun
 		return
 	}
 	parts = append(parts, tail)
-	writeJSON(w, 200, translate.CompletionBody(f.ID, f.Created, f.Model, strings.Join(parts, ""), assembler.Usage))
+	writeJSON(w, 200, translate.CompletionBody(f.ID, f.Created, f.Model, strings.Join(parts, ""), assembler.Sources(), assembler.Usage))
 }
 
 // IsLoopback reports whether host is a loopback name or address.

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -389,6 +390,9 @@ func NewAssembler() *Assembler {
 	return &Assembler{nodeKinds: map[string]string{}, citations: citations.New()}
 }
 
+// Sources returns the citation sources seen so far, in number order.
+func (a *Assembler) Sources() []citations.Source { return a.citations.Sources() }
+
 // Done reports whether the answer is terminal: turn.completed or a failure was seen.
 func (a *Assembler) Done() bool { return a.Completed || a.Failure != nil }
 
@@ -404,7 +408,7 @@ func (a *Assembler) Feed(event events.Event) string {
 		a.nodeKinds[e.NodeID] = e.Kind
 		a.seenKinds = remember(a.seenKinds, e.Kind)
 	case events.ReferenceAdded:
-		a.citations.AddReference(e.RefID, e.Payload)
+		a.citations.AddReference(e)
 	case events.TextDelta:
 		kind, known := a.nodeKinds[e.NodeID]
 		if !known {
@@ -589,8 +593,45 @@ func (f ChunkFormatter) Error(e *TurnError) string {
 }
 
 type completionMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role        string       `json:"role"`
+	Content     string       `json:"content"`
+	Annotations []Annotation `json:"annotations,omitempty"`
+}
+
+// Annotation is OpenAI's url_citation annotation: where in content a source is cited.
+type Annotation struct {
+	Type        string      `json:"type"`
+	URLCitation URLCitation `json:"url_citation"`
+}
+
+// URLCitation locates one citation link; indices count characters (code points).
+type URLCitation struct {
+	StartIndex int    `json:"start_index"`
+	EndIndex   int    `json:"end_index"`
+	Title      string `json:"title"`
+	URL        string `json:"url"`
+}
+
+// Annotations finds every inline citation link of sources in content, in text order.
+func Annotations(content string, sources []citations.Source) []Annotation {
+	var out []Annotation
+	for _, s := range sources {
+		if s.URL == "" {
+			continue
+		}
+		link := citations.Link(s)
+		for from := 0; ; {
+			i := strings.Index(content[from:], link)
+			if i < 0 {
+				break
+			}
+			start := utf8.RuneCountInString(content[:from+i])
+			out = append(out, Annotation{"url_citation", URLCitation{start, start + utf8.RuneCountInString(link), s.Title, s.URL}})
+			from += i + len(link)
+		}
+	}
+	slices.SortFunc(out, func(a, b Annotation) int { return a.URLCitation.StartIndex - b.URLCitation.StartIndex })
+	return out
 }
 
 type completionChoice struct {
@@ -609,7 +650,7 @@ type completion struct {
 }
 
 // CompletionBody is the non-streaming response.
-func CompletionBody(id string, created int64, model, content string, u *events.Usage) any {
+func CompletionBody(id string, created int64, model, content string, sources []citations.Source, u *events.Usage) any {
 	return completion{id, "chat.completion", created, model,
-		[]completionChoice{{0, completionMessage{"assistant", content}, "stop"}}, UsageDict(u)}
+		[]completionChoice{{0, completionMessage{"assistant", content, Annotations(content, sources)}, "stop"}}, UsageDict(u)}
 }

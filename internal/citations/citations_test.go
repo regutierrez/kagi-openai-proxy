@@ -4,12 +4,15 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"kagiopenaiproxy/internal/events"
 )
 
+// rewriter registers URL-less sources, so markers render as [^n].
 func rewriter(refs ...string) *Rewriter {
 	r := New()
 	for _, ref := range refs {
-		r.AddReference(ref, map[string]any{"url": "https://example.org/" + ref})
+		r.AddReference(events.ReferenceAdded{RefID: ref})
 	}
 	return r
 }
@@ -30,12 +33,30 @@ func eq(t *testing.T, got, want []string) {
 	}
 }
 
-func TestRenumberedByFirstCitationOrder(t *testing.T) {
+func TestNumberedInArrivalOrder(t *testing.T) {
 	r := rewriter("a", "b", "c")
-	if got := r.Feed("x[^b] y[^a] z[^b] w[^c]"); got != "x[^1] y[^2] z[^1] w[^3]" {
+	if got := r.Feed("x[^b] y[^a] z[^b] w[^c]"); got != "x[^2] y[^1] z[^2] w[^3]" {
 		t.Fatalf("got %q", got)
 	}
-	eq(t, r.Cited(), []string{"b", "a", "c"})
+	// A repeated ref_id (with or without a #suffix) keeps its first number.
+	if s, isNew := r.AddReference(events.ReferenceAdded{RefID: "b#p2", URL: "https://late.example"}); isNew || s.N != 2 || s.URL != "" {
+		t.Fatalf("repeat = %+v, new=%v", s, isNew)
+	}
+	var ids []string
+	for _, s := range r.Sources() {
+		ids = append(ids, s.ID)
+	}
+	eq(t, ids, []string{"a", "b", "c"})
+}
+
+func TestSourcesWithURLBecomeInlineLinks(t *testing.T) {
+	r := New()
+	r.AddReference(events.ReferenceAdded{RefID: "w", URL: "https://en.wikipedia.org/wiki/Lyon_(city) x", Title: "Lyon"})
+	r.AddReference(events.ReferenceAdded{RefID: "i", URL: "https://insee.fr/a"})
+	got := strings.Join(run(r, "Lyon [^i][^w", "#3-9]."), "")
+	if want := "Lyon [[2]](https://insee.fr/a)[[1]](https://en.wikipedia.org/wiki/Lyon_%28city%29%20x)."; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
 }
 
 func TestMarkerSplitAcrossDeltas(t *testing.T) {
@@ -53,12 +74,11 @@ func TestUnknownRefPassesThroughUnchanged(t *testing.T) {
 	if got := r.Feed("a[^mystery] b[^known] c[^mystery#x]"); got != "a[^mystery] b[^1] c[^mystery#x]" {
 		t.Fatalf("got %q", got)
 	}
-	eq(t, r.Cited(), []string{"known"})
 }
 
 func TestHashSuffixedRefIDsUsePartBeforeHash(t *testing.T) {
 	r := rewriter("r1", "r2")
-	if got := r.Feed("[^r2#chunk-3] and [^r1#p1] and [^r2#chunk-9]"); got != "[^1] and [^2] and [^1]" {
+	if got := r.Feed("[^r2#chunk-3] and [^r1#p1] and [^r2#chunk-9]"); got != "[^2] and [^1] and [^2]" {
 		t.Fatalf("got %q", got)
 	}
 }

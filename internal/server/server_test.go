@@ -48,8 +48,8 @@ func TestStreamingHappyPathExactChunksAndCleanup(t *testing.T) {
 		{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null},
 		{"index": 0, "delta": {"content": "The capital of France is Paris"}, "finish_reason": null},
 		{"index": 0, "delta": {"content": " "}, "finish_reason": null},
-		{"index": 0, "delta": {"content": "[^1]. About 2.1 million people live there[^2]"}, "finish_reason": null},
-		{"index": 0, "delta": {"content": ", and it hosts the national government[^1]."}, "finish_reason": null},
+		{"index": 0, "delta": {"content": "[[2]](https://example.org/france). About 2.1 million people live there[[1]](https://example.org/paris-population)"}, "finish_reason": null},
+		{"index": 0, "delta": {"content": ", and it hosts the national government[[2]](https://example.org/france)."}, "finish_reason": null},
 		{"index": 0, "delta": {}, "finish_reason": "stop"}]`)
 	if last(frames) != "[DONE]" || strings.Join(contents(frames), "") != kagitest.RealisticAnswer {
 		t.Fatalf("frames end %v", last(frames))
@@ -93,7 +93,11 @@ func TestNonStreamingHappyPathWithUsage(t *testing.T) {
 	if r.status != 200 || body["object"] != "chat.completion" || !strings.HasPrefix(body["id"].(string), "chatcmpl-") {
 		t.Fatalf("%d %v", r.status, body)
 	}
-	mustJSONEqual(t, body["choices"], `[{"index": 0, "message": {"role": "assistant", "content": "`+kagitest.RealisticAnswer+`"}, "finish_reason": "stop"}]`)
+	// Annotations locate each citation link; indices count characters.
+	mustJSONEqual(t, body["choices"], `[{"index": 0, "message": {"role": "assistant", "content": "`+kagitest.RealisticAnswer+`", "annotations": [
+		{"type": "url_citation", "url_citation": {"start_index": 31, "end_index": 64, "title": "France - Government", "url": "https://example.org/france"}},
+		{"type": "url_citation", "url_citation": {"start_index": 101, "end_index": 144, "title": "Paris population 2025", "url": "https://example.org/paris-population"}},
+		{"type": "url_citation", "url_citation": {"start_index": 182, "end_index": 215, "title": "France - Government", "url": "https://example.org/france"}}]}, "finish_reason": "stop"}]`)
 	mustJSONEqual(t, body["usage"], `{"prompt_tokens": 412, "completion_tokens": 37, "total_tokens": 449}`)
 	e.waitIdle()
 	if !e.fake.Has(kagitest.Delete) {

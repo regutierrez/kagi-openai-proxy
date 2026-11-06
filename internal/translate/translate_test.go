@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
+	"kagiopenaiproxy/internal/citations"
 	"kagiopenaiproxy/internal/events"
 	"kagiopenaiproxy/internal/logx"
 	"kagiopenaiproxy/internal/redact"
@@ -105,11 +107,11 @@ func TestDeltaForUnknownNodeTreatedAsTextAndWarnedOnce(t *testing.T) {
 func TestCitationsRewrittenInAssembledText(t *testing.T) {
 	a := NewAssembler()
 	var outs []string
-	for _, e := range []events.Event{events.ReferenceAdded{RefID: "r1", Payload: map[string]any{}}, events.NodeCreated{NodeID: "t", Kind: "text"},
+	for _, e := range []events.Event{events.ReferenceAdded{RefID: "r1", URL: "https://example.org"}, events.NodeCreated{NodeID: "t", Kind: "text"},
 		events.TextDelta{NodeID: "t", Text: "Fact [^r"}, events.TextDelta{NodeID: "t", Text: "1#a]."}} {
 		outs = append(outs, a.Feed(e))
 	}
-	if outs[2] != "Fact " || outs[3] != "[^1]." {
+	if outs[2] != "Fact " || outs[3] != "[[1]](https://example.org)." {
 		t.Fatalf("outs = %q", outs)
 	}
 }
@@ -366,5 +368,15 @@ func TestBudgetCountsCharactersNotBytes(t *testing.T) {
 	text := build(t, `[{"role": "user", "content": "old"}, {"role": "user", "content": "`+strings.Repeat("é", 120)+`"}]`, 100)
 	if strings.Contains(text, OmissionMarker) {
 		t.Fatal("dropped a message that fits by character count")
+	}
+}
+
+func TestAnnotationsCountCharactersNotBytes(t *testing.T) {
+	src := citations.Source{N: 1, URL: "https://e.org", Title: "E"}
+	content := "Café é " + citations.Link(src) // 7 characters, 9 bytes before the link
+	got := Annotations(content, []citations.Source{src, {N: 2, Title: "no url"}})
+	want := []Annotation{{"url_citation", URLCitation{7, 7 + len("[[1]](https://e.org)"), "E", "https://e.org"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v", got)
 	}
 }

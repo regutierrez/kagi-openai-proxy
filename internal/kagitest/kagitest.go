@@ -20,7 +20,8 @@ import (
 var RealisticStream []byte
 
 // RealisticAnswer is what the proxy must produce from RealisticStream.
-const RealisticAnswer = "The capital of France is Paris [^1]. About 2.1 million people live there[^2], and it hosts the national government[^1]."
+// Sources are numbered in arrival order (r_a1 = 1, r_b2 = 2) and cited as links.
+const RealisticAnswer = "The capital of France is Paris [[2]](https://example.org/france). About 2.1 million people live there[[1]](https://example.org/paris-population), and it hosts the national government[[2]](https://example.org/france)."
 
 // Fixed identifiers and secrets used across tests.
 const (

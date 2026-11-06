@@ -117,8 +117,19 @@ func TestParseFrameEventTypes(t *testing.T) {
 	// frame-level error alongside a normal event
 	eqEvents(t, ParseFrame(`{"event": {"type": "turn.started", "payload": {}}, "error": "boom"}`),
 		events.Unknown{Type: "turn.started"}, events.TurnFailed{Code: "kagi_stream_error", Message: "boom"})
-	// Well-formed but unknown types are ignored (not drift).
-	eqEvents(t, ParseFrame(`{"title": "New title"}`), events.Unknown{Type: "frame_without_event"})
+	// A title-only frame names the thread; other event-less frames are ignored (not drift).
+	eqEvents(t, ParseFrame(`{"title": "New title"}`), events.Title{Text: "New title"})
+	eqEvents(t, ParseFrame(`{"persisted": true}`), events.Unknown{Type: "frame_without_event"})
+	// Live shapes of the activity events the proxy reads (search query, thinking text).
+	eqEvents(t, ParseFrame(eventFrame("node.created", "call_1", map[string]any{"kind": "activity", "type": "tool_call", "tool_name": "search", "status": "running"})),
+		events.NodeCreated{NodeID: "call_1", Kind: "activity", Type: "tool_call", ToolName: "search"})
+	eqEvents(t, ParseFrame(eventFrame("node.updated", "call_1", map[string]any{"status": "running", "tool_name": "search", "arguments": map[string]any{"count": 5, "query": "Lyon population"}})),
+		events.NodeUpdated{NodeID: "call_1", Status: "running", ToolName: "search", Query: "Lyon population"})
+	eqEvents(t, ParseFrame(eventFrame("node.completed", "th", map[string]any{"status": "completed", "content": "Search for Lyon."})),
+		events.NodeUpdated{NodeID: "th", Status: "completed", Content: "Search for Lyon."})
+	eqEvents(t, ParseFrame(eventFrame("reference.added", nil, map[string]any{"ref_id": "fe3f5a", "url": "https://en.wikipedia.org/wiki/Lyon", "title": "Lyon",
+		"snippet": "Third-largest city", "favicon": "https://kagi.com/f", "extra": map[string]any{"published_at": "Jan 14, 2026"}})),
+		events.ReferenceAdded{RefID: "fe3f5a", URL: "https://en.wikipedia.org/wiki/Lyon", Title: "Lyon", Snippet: "Third-largest city", Favicon: "https://kagi.com/f", PublishedAt: "Jan 14, 2026"})
 }
 
 func TestMalformedFramesAreProtocolDrift(t *testing.T) {
@@ -135,7 +146,7 @@ func TestMalformedFramesAreProtocolDrift(t *testing.T) {
 		`{"event": {"type": "reference.added", "payload": {"url": "u"}}}`,              // no ref_id
 		`{"event": null}`, // present but null (absent key is a title-only frame)
 		`{"event": {"type": "turn.failed", "payload": {}}}`, // no error_code
-		`{"a": 1} trailing`,                                 // trailing data
+		`{"a": 1} trailing`, // trailing data
 	} {
 		t.Run(data, func(t *testing.T) {
 			evs := ParseFrame(data)

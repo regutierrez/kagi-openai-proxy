@@ -1,6 +1,10 @@
-// Package citations rewrites Kagi citation markers [^ref_id] to [^n] while streaming.
+// Package citations numbers citation sources and rewrites Kagi citation markers
+// [^ref_id] while streaming.
 //
-// n is the 1-based order in which a known reference is first cited. Unknown ref_ids pass
+// Sources are numbered 1, 2, ... in the order Kagi announces them (all of a turn's
+// search results arrive before its answer text, verified live), so the numbers in the
+// text match a source list shown next to it. A marker for a source with a URL becomes
+// the Markdown link [[n]](url); one without a URL becomes [^n]. Unknown ref_ids pass
 // through unchanged. An opened-but-unclosed marker is held back (up to MaxHeld
 // characters) so markers split across deltas are rewritten correctly.
 package citations
@@ -9,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"kagiopenaiproxy/internal/events"
 )
 
 // MaxHeld caps the held tail of an unclosed marker; longer tails are released raw.
@@ -16,23 +22,37 @@ const MaxHeld = 64
 
 const open = "[^"
 
+// Source is one citation source.
+type Source struct {
+	N                                             int
+	ID, URL, Title, Snippet, Favicon, PublishedAt string
+}
+
 // Rewriter holds the citation state of one answer.
 type Rewriter struct {
-	references map[string]map[string]any
-	cited      []string
-	held       string
+	byID    map[string]int // base ref_id -> index in sources
+	sources []Source
+	held    string
 }
 
 // New returns an empty Rewriter.
-func New() *Rewriter { return &Rewriter{references: map[string]map[string]any{}} }
+func New() *Rewriter { return &Rewriter{byID: map[string]int{}} }
 
-// AddReference registers a citation source.
-func (r *Rewriter) AddReference(refID string, payload map[string]any) {
-	r.references[baseID(refID)] = payload
+// AddReference registers a source. It returns the numbered source and whether it is
+// new; a repeated ref_id keeps its first number.
+func (r *Rewriter) AddReference(ref events.ReferenceAdded) (Source, bool) {
+	id := baseID(ref.RefID)
+	if i, ok := r.byID[id]; ok {
+		return r.sources[i], false
+	}
+	source := Source{len(r.sources) + 1, id, ref.URL, ref.Title, ref.Snippet, ref.Favicon, ref.PublishedAt}
+	r.byID[id] = len(r.sources)
+	r.sources = append(r.sources, source)
+	return source, true
 }
 
-// Cited returns the ref_ids in order of first citation.
-func (r *Rewriter) Cited() []string { return append([]string(nil), r.cited...) }
+// Sources returns the registered sources in number order.
+func (r *Rewriter) Sources() []Source { return append([]Source(nil), r.sources...) }
 
 // Feed returns the text that can be emitted now and holds back any incomplete marker.
 func (r *Rewriter) Feed(text string) string {
@@ -90,21 +110,24 @@ func (r *Rewriter) Flush() string {
 }
 
 func (r *Rewriter) rewrite(marker string) string {
-	ref := baseID(marker[len(open) : len(marker)-1])
-	if ref == "" {
+	i, known := r.byID[baseID(marker[len(open):len(marker)-1])]
+	if !known {
 		return marker
 	}
-	if _, known := r.references[ref]; !known {
-		return marker
+	source := r.sources[i]
+	if source.URL == "" {
+		return "[^" + strconv.Itoa(source.N) + "]"
 	}
-	for n, cited := range r.cited {
-		if cited == ref {
-			return "[^" + strconv.Itoa(n+1) + "]"
-		}
-	}
-	r.cited = append(r.cited, ref)
-	return "[^" + strconv.Itoa(len(r.cited)) + "]"
+	return Link(source)
 }
+
+// Link is the inline Markdown citation for a source: [[n]](url).
+func Link(s Source) string {
+	return "[[" + strconv.Itoa(s.N) + "]](" + linkEscaper.Replace(s.URL) + ")"
+}
+
+// linkEscaper keeps a URL inside a Markdown link destination.
+var linkEscaper = strings.NewReplacer(" ", "%20", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E")
 
 func baseID(refID string) string {
 	base, _, _ := strings.Cut(refID, "#")

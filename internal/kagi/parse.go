@@ -24,7 +24,7 @@ const ProtocolDriftCode = "kagi_protocol_drift"
 var quotaHints = []string{"quota", "rate_limit", "rate-limit", "ratelimit", "rate_limited", "too_many", "limit_exceeded", "usage_limit"}
 
 // Known event types the proxy deliberately ignores (not logged as unknown).
-var ignoredEventTypes = map[string]bool{"turn.started": true}
+var ignoredEventTypes = map[string]bool{"turn.started": true, "source.read": true}
 
 var (
 	loggedUnknownMu sync.Mutex
@@ -134,6 +134,9 @@ func ParseFrame(data string) []events.Event {
 		}
 		out = append(kept, frameError(frameErr))
 	}
+	if title, ok := nonEmptyString(obj["title"]); ok {
+		out = append(out, events.Title{Text: title})
+	}
 	if final, _ := obj["is_final"].(bool); final {
 		out = append(out, events.Final{})
 	}
@@ -193,7 +196,23 @@ func parseEvent(event map[string]any) events.Event {
 		if !hasID || !isString {
 			return drift("node.created without node_id or payload.kind")
 		}
-		return events.NodeCreated{NodeID: id, Kind: nodeKind}
+		created := events.NodeCreated{NodeID: id, Kind: nodeKind}
+		created.Type, _ = payload["type"].(string)
+		created.ToolName, _ = payload["tool_name"].(string)
+		created.Content, _ = payload["content"].(string)
+		return created
+	case "node.updated", "node.completed":
+		if !hasID {
+			return unknown(kind + " without node_id")
+		}
+		updated := events.NodeUpdated{NodeID: id}
+		updated.Status, _ = payload["status"].(string)
+		updated.ToolName, _ = payload["tool_name"].(string)
+		updated.Content, _ = payload["content"].(string)
+		if args, ok := asMap(payload["arguments"]); ok {
+			updated.Query, _ = args["query"].(string)
+		}
+		return updated
 	case "node.delta":
 		delta, isString := payload["delta"].(string)
 		if !hasID || !isString {
@@ -205,11 +224,15 @@ func parseEvent(event map[string]any) events.Event {
 		if !ok {
 			return drift("reference.added without payload.ref_id")
 		}
-		copied := make(map[string]any, len(payload))
-		for k, v := range payload {
-			copied[k] = v
+		ref := events.ReferenceAdded{RefID: refID}
+		ref.URL, _ = payload["url"].(string)
+		ref.Title, _ = payload["title"].(string)
+		ref.Snippet, _ = payload["snippet"].(string)
+		ref.Favicon, _ = payload["favicon"].(string)
+		if extra, ok := asMap(payload["extra"]); ok {
+			ref.PublishedAt, _ = extra["published_at"].(string)
 		}
-		return events.ReferenceAdded{RefID: refID, Payload: copied}
+		return ref
 	case "turn.completed":
 		// Usage is informational; a missing/odd usage block does not invalidate the answer.
 		return events.TurnCompleted{Usage: parseUsage(payload["usage"])}
@@ -291,10 +314,10 @@ func IsReasoningEffort(v string) bool { return slices.Contains(ReasoningEfforts,
 
 // ModelInfo is one usable catalog entry.
 type ModelInfo struct {
-	ID               string
-	Provider         string // "" when absent
-	DisplayName      string
-	ContextWindow    int // 0 when unknown
+	ID            string
+	Provider      string // "" when absent
+	DisplayName   string
+	ContextWindow int // 0 when unknown
 	// ReasoningEfforts is the model's reasoning_effort option list, in catalog order;
 	// nil when the catalog does not list one (then only the global set applies).
 	ReasoningEfforts []string

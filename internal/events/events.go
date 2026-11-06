@@ -2,8 +2,8 @@
 // else ever sees Kagi JSON.
 package events
 
-// Event is one of NodeCreated, TextDelta, ReferenceAdded, TurnCompleted, TurnFailed,
-// Final, Unknown.
+// Event is one of NodeCreated, NodeUpdated, TextDelta, ReferenceAdded, Title,
+// TurnCompleted, TurnFailed, Final, Unknown.
 type Event interface {
 	// Name is the event's type name, used in diagnostics (e.g. the empty-answer guard).
 	Name() string
@@ -17,17 +17,26 @@ type Usage struct {
 	ModelVersion *string
 }
 
-// NodeCreated announces a node; Kind is "text", "thinking", "activity" or anything new.
-type NodeCreated struct{ NodeID, Kind string }
+// NodeCreated announces a node. Kind is "text" (the answer), "activity" (search,
+// thinking, and other steps), "assistant_message" (the turn's root), or anything new.
+// For activity nodes, Type is "tool_call", "thinking", "config", ...; ToolName is
+// e.g. "search"; Content is the node's text so far (a thinking summary).
+type NodeCreated struct{ NodeID, Kind, Type, ToolName, Content string }
+
+// NodeUpdated is node.updated or node.completed: new status, the search query once
+// known, and the node's full text on completion. Empty fields did not change.
+type NodeUpdated struct{ NodeID, Status, ToolName, Query, Content string }
 
 // TextDelta is incremental markdown for one node of any kind (the consumer filters by kind).
 type TextDelta struct{ NodeID, Text string }
 
-// ReferenceAdded registers a citation source.
+// ReferenceAdded registers a citation source. Fields other than RefID may be "".
 type ReferenceAdded struct {
-	RefID   string
-	Payload map[string]any
+	RefID, URL, Title, Snippet, Favicon, PublishedAt string
 }
+
+// Title is Kagi's generated title for the thread.
+type Title struct{ Text string }
 
 // TurnCompleted ends the answer; Usage is nil when Kagi reported none.
 type TurnCompleted struct{ Usage *Usage }
@@ -47,6 +56,8 @@ type Final struct{}
 type Unknown struct{ Type string }
 
 func (NodeCreated) Name() string    { return "NodeCreated" }
+func (NodeUpdated) Name() string    { return "NodeUpdated" }
+func (Title) Name() string          { return "Title" }
 func (TextDelta) Name() string      { return "TextDelta" }
 func (ReferenceAdded) Name() string { return "ReferenceAdded" }
 func (TurnCompleted) Name() string  { return "TurnCompleted" }
