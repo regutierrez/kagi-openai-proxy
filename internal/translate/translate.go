@@ -238,6 +238,10 @@ func ParseChatRequest(body any) (ChatRequest, *TurnError) {
 		if terr != nil {
 			return ChatRequest{}, terr
 		}
+		content, terr = appendToolCalls(content, role, msg["tool_calls"], i)
+		if terr != nil {
+			return ChatRequest{}, terr
+		}
 		req.Messages = append(req.Messages, Message{Role: role, Content: content})
 		allSystem = allSystem && role == RoleSystem
 	}

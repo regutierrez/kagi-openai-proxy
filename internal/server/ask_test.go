@@ -10,7 +10,6 @@ import (
 	"kagiopenaiproxy/internal/kagitest"
 )
 
-
 // liveShapedTurn mirrors a live Kagi search turn: config and search activity, a title
 // frame, sources, a thinking step, then the answer citing two sources.
 func liveShapedTurn() []byte {

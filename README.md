@@ -96,9 +96,16 @@ one prompt (system instructions plus a `User:` / `Assistant:` transcript). If th
 exceeds about 70% of the model's context window, the oldest messages are replaced by
 `[...earlier messages omitted...]`. Long chats resend their history each turn.
 
-- Images become `[image omitted]`. `tools`, `tool_choice`, `n`, `stop`, `seed`,
-  `top_p`, `response_format`, penalties, and `user` are ignored. `temperature` is
-  validated but not forwarded.
+- Images become `[image omitted]`. `n`, `stop`, `seed`, `top_p`, `response_format`,
+  penalties, and `user` are ignored. `temperature` is validated but not forwarded.
+- `tools` work through the prompt, since Kagi has no native tool calling. The tool
+  definitions and a `TOOL_CALL:{"name":...,"arguments":{...}}` reply grammar are added
+  to the prompt as a system block. A reply that uses the grammar is returned as
+  `tool_calls` with `finish_reason: "tool_calls"`; anything else, including a call to an
+  unknown tool or with bad JSON, comes back as plain text. Assistant `tool_calls` and
+  `tool` results in the history are flattened into the transcript. With tools the answer
+  is buffered, so streaming clients get keepalives, then the whole result. `tool_choice`
+  is not enforced, except `"none"`, which ignores `tools`.
 - Thinking and search steps are not part of the answer.
 - Non-streaming responses carry OpenAI `message.annotations` of type `url_citation`,
   one per citation link, with `start_index` / `end_index` in characters (code points).

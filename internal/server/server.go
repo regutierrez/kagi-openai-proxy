@@ -383,6 +383,11 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	catalog, staleReason := p.catalog.get(context.WithoutCancel(r.Context()))
+	tools, terr := translate.ParseTools(body)
+	if terr != nil {
+		writeError(w, terr)
+		return
+	}
 	var responseModel string
 	var spec translate.ModelSpec
 	if chat.Model == "" {
@@ -416,6 +421,7 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			contextWindow = info.ContextWindow
 		}
 	}
+	chat.Messages = translate.WithToolPrompt(chat.Messages, tools)
 	content := translate.Flatten(chat.Messages, contextWindow)
 
 	switch p.acquireSlot(r.Context()) {
@@ -442,6 +448,10 @@ func (p *Proxy) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Kagi-Thread", runner.conversationUUID)
 
 	formatter := translate.ChunkFormatter{ID: newCompletionID(), Created: time.Now().Unix(), Model: responseModel}
+	if len(tools) > 0 {
+		p.respondWithTools(w, r, runner, formatter, chat.Stream, chat.IncludeUsage, tools)
+		return
+	}
 	if chat.Stream {
 		p.stream(w, r, runner, formatter, chat.IncludeUsage)
 		return
